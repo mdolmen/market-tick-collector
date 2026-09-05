@@ -54,6 +54,9 @@ data/
 *.jsonl
 *.jsonl.gz
 *.ndjson
+# ...except the recorded frames the tests replay: small, and not reproducible
+# on demand — the session they came from is gone.
+!tests/fixtures/*.jsonl
 
 # Profiling artefacts
 *.prof
