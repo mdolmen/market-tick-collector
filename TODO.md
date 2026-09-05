@@ -134,6 +134,8 @@ is a legal `Source` and `WorkerApp` ran it untouched, so Phase 0 needed **zero**
 - [ ] Memory allocation and GC pause impact during volume spikes
 - [ ] Compare the result against the Phase 0 prediction, whichever way it went
 - [ ] Flamegraph before and after one profiling-driven optimisation
+- [ ] Bounded cache over `scaled_int` — 6.2x in Phase 0, but distinct sizes grow linearly,
+      so it needs a size bound and an eviction policy sized against a long capture
 
 ## Phase 10 · Read layer
 

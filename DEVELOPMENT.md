@@ -117,6 +117,38 @@ wrong in a way that happens to flatter. The replay ceiling in Phase 1 is the num
 answers "how fast is your code", which is the § *Two numbers, never merged* discipline
 arriving from a direction nobody predicted.
 
+### Acting on it: the scaling path
+
+The finding named a hotspot, so it got fixed rather than filed. `scaled_int` shuffles digits
+instead of going through `Decimal`, over the 88,358 price and size strings in the corpus:
+
+| | ns/value | vs. before |
+|---|---|---|
+| `Decimal(v).scaleb(s)` — before | 235.4 | 1.00x |
+| digit shuffle, as shipped | **198.2** | **1.19x** |
+| …the same parse without its two validating lines | 115.4 | 2.04x |
+| …as shipped, plus a `dict` cache on the string | 37.8 | 6.22x |
+
+End to end that is decode + model from 8.6µs to **7.3µs** per frame on `msgspec` typed —
+136,452 frames/s against 116,765, about **15%**. Stdlib `json` moved 9.7µs → 8.5µs.
+
+Two deliberate refusals in that table, both worth more than the milliseconds:
+
+- **The unvalidated parse is 40% faster and was not taken.** Dropping the sign handling and
+  the `isdigit` guard gets to 115ns, at the price of `int()` quietly accepting `"1_0"` as ten
+  and `"+-1"` as one. That is a silent-corruption path into a *book key*, which is the one
+  failure this project is organised around not having. 83ns is not the price of that.
+- **The cache is 6.2x and belongs to Phase 9, not here.** It is by far the biggest number on
+  the page, because only 15,347 of 88,358 values were distinct. But 6,782 of those were
+  distinct *sizes* after five minutes, and that set grows roughly linearly — an unbounded
+  cache is a memory leak wearing a speedup's clothes. It needs a bound, an eviction policy and
+  a long capture to size them against, which is a Phase 9 optimisation with a real design in
+  it, not a Phase 0 one-liner.
+
+What survives from the prediction either way: switching decoder is worth ~13% and this was
+worth ~15%, so both are small change next to the wake-up cost above. Neither is where the
+throughput story gets written.
+
 ### Other findings
 
 - **Phase 0 required zero changes to `data-pipeline-core`.** A bounded source is a legal
