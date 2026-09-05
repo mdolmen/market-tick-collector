@@ -11,12 +11,18 @@ ClickHouse as the primary sink.
 
 ## Phase 0 · Walking skeleton
 
-- [ ] Binance spot, one symbol, full-depth diffs: connect, buffer, splice, apply
-- [ ] Land normalized level rows — one row per price level, not per frame — to one Parquet file
-- [ ] Benchmark decode early: `json` vs `orjson` vs `msgspec.json` with a typed schema
-- [ ] Measure msg/s and receive-to-disk p99; commit the baseline number
-- [ ] Minimal `ServiceApp` stub: start, graceful shutdown, `/healthz`
-- [ ] Write the architecture prediction down now, so Phase 9 can prove it wrong
+- [x] uv project as a `data-pipeline-core` consumer: `collector/`, ruff + `mypy --strict`
+- [x] Binance spot, one symbol, full-depth diffs: connect, buffer, splice, apply
+- [x] Land normalized level rows — one row per price level, not per frame — as a Parquet dataset
+- [x] Dump raw frames verbatim to `.jsonl`, feeding the decode benchmark and Phase 1's replay
+- [x] Benchmark decode early: `json` vs `orjson` vs `msgspec.json` with a typed schema
+- [x] Measure msg/s and **in-process** p99 — receive → book applied → row built — and commit it
+- [x] Write the architecture prediction down now, so Phase 9 can prove it wrong
+
+Receive-to-disk p99 moved to Phase 7: one `sink.write()` at the end of a bounded run lands
+every row at once, so the number would describe the run's shape and not the pipeline's. The
+`ServiceApp` stub moved to Phase 4, where the real one is already listed — a bounded source
+is a legal `Source` and `WorkerApp` ran it untouched, so Phase 0 needed **zero** SDK changes.
 
 ## Phase 1 · Capture & replay harness
 
@@ -100,6 +106,9 @@ ClickHouse as the primary sink.
 
 - [ ] `BatchSink[ArrowBatch]` contract in `data-pipeline-core`
 - [ ] Arrow `RecordBatch` accumulation, flush on size or time
+- [ ] Receive-to-disk p50 / p90 / p99 — deferred from Phase 0, meaningless before this sink
+- [ ] Pin the landed column schema: dlt drops an all-null column, so files in one dataset
+      disagree and a naive per-file read fails (seen in Phase 0 on `exchange_ts`)
 - [ ] ClickHouse as the primary sink
 - [ ] Rotating Parquet on GCS partitioned by `date/symbol` as the archive tier
 - [ ] Retention and tiering rule sized for 10⁷ rows/day
