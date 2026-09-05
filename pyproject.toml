@@ -29,7 +29,8 @@ dev = [
 [tool.ruff]
 line-length = 88
 target-version = "py311"
-src = ["collector"]
+# The project root, so ``collector`` and ``tests`` sort as first-party imports.
+src = ["."]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
@@ -37,7 +38,7 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 [tool.mypy]
 python_version = "3.11"
 strict = true
-files = ["collector"]
+files = ["collector", "tests"]
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
