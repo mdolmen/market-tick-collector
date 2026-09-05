@@ -1,0 +1,57 @@
+[project]
+name = "market-tick-collector"
+version = "0.0.0"
+description = "High-volume L2 order book capture from public crypto exchange websockets."
+requires-python = ">=3.11"
+# websockets ships a synchronous client, which is what Source.fetch() needs;
+# the async client stays available for the Phase 4 receiver benchmark.
+dependencies = [
+    "data-pipeline-core",
+    "websockets>=13",
+]
+
+# Co-development: depend on the SDK via an editable local path while both repos
+# evolve together. Dropped (and the version pinned ==0.1.*) once v0.1.0 is cut.
+[tool.uv.sources]
+data-pipeline-core = { path = "../data-pipeline-core", editable = true }
+
+[dependency-groups]
+dev = [
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "pre-commit>=3.7",
+    "pytest>=8",
+    # bench/decode.py — the two decoders measured against the stdlib baseline.
+    "orjson>=3.10",
+    "msgspec>=0.18",
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+src = ["collector"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["collector"]
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+# Third-party libraries that ship without complete type information.
+module = ["dlt.*", "fsspec.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# pyarrow ships partial types; skip following so calls into it are untyped-safe.
+module = ["pyarrow.*"]
+follow_imports = "skip"
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra"
