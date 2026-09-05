@@ -1,0 +1,60 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+.Python
+build/
+dist/
+*.egg-info/
+*.egg
+wheels/
+
+# Virtual environments
+.venv/
+venv/
+env/
+.env
+.env.*
+
+# uv
+.uv/
+
+# Testing / coverage
+.pytest_cache/
+.hypothesis/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# Type checking / linting
+.mypy_cache/
+.ruff_cache/
+.dmypy.json
+
+# IDEs
+.idea/
+*.swp
+
+# OS
+.DS_Store
+
+# Secrets / credentials
+*.pem
+*-key.json
+service-account*.json
+
+# Captured market data — raw frames and landed rows are large and reproducible
+captures/
+data/
+*.parquet
+*.jsonl
+*.jsonl.gz
+*.ndjson
+
+# Profiling artefacts
+*.prof
+perf.data*
