@@ -20,6 +20,10 @@ from collector.model import scaled_int
 
 VENUE = "binance"
 
+# The stream tag a captured REST depth snapshot carries. Binance's snapshot
+# arrives out of band, so it has no websocket stream name of its own.
+REST_DEPTH_STREAM = "rest:depth"
+
 # Binance spot quotes no finer than eight decimal places on either price or
 # quantity, so one fixed exponent scales both exactly. ``scaled_int`` raises if
 # a venue ever exceeds it, which turns a silent truncation into a failed run.
@@ -84,6 +88,38 @@ def stream_name(symbol: str, interval_ms: int) -> str:
     return f"{symbol.lower()}@depth@{interval_ms}ms"
 
 
+def chains(prev_final_id: int, first_id: int) -> bool:
+    """``U == prev_u + 1`` — the chain rule, with exactly one definition.
+
+    Two callers ask different questions of it. ``BinanceDepthAdapter`` asks *is
+    the book still trustworthy*; the capture source asks *did the socket skip,
+    so should I fetch a fresh snapshot*. They are genuinely different decisions
+    — one is about state, the other about I/O — but they are the same venue
+    rule, and a venue rule gets one home (``CLAUDE.md``, the normalization
+    boundary).
+    """
+    return first_id == prev_final_id + 1
+
+
+def chain_ids(payload: Mapping[str, Any]) -> tuple[int, int]:
+    """``(U, u)`` out of a raw frame, without building the record model.
+
+    The capture path needs the ids to know when to snapshot and nothing else;
+    constructing ``Level`` tuples there would put the whole normalization cost
+    on a worker whose only job is landing bytes.
+    """
+    return int(payload["U"]), int(payload["u"])
+
+
+def snapshot_too_old(first_buffered_id: int, last_update_id: int) -> bool:
+    """The snapshot predates the buffer, so updates between them are lost.
+
+    Shared by ``splice`` (which classifies) and the capture source (which
+    decides to refetch), for the same one-definition reason as ``chains``.
+    """
+    return first_buffered_id > last_update_id + 1
+
+
 def _levels(raw: Sequence[Sequence[str]]) -> tuple[Level, ...]:
     return tuple(
         Level(
@@ -145,9 +181,9 @@ def splice(buffered: Sequence[DepthEvent], last_update_id: int) -> SpliceResult:
     for index, event in enumerate(buffered):
         if event.final_id <= last_update_id:
             continue  # entirely in the past — discard
-        if event.first_id <= last_update_id + 1:
-            return SpliceResult(SpliceOutcome.READY, index)
-        return SpliceResult(SpliceOutcome.SNAPSHOT_TOO_OLD)
+        if snapshot_too_old(event.first_id, last_update_id):
+            return SpliceResult(SpliceOutcome.SNAPSHOT_TOO_OLD)
+        return SpliceResult(SpliceOutcome.READY, index)
     return SpliceResult(SpliceOutcome.BUFFER_BEHIND)
 
 
@@ -172,7 +208,9 @@ class BinanceDepthAdapter:
 
     def in_sequence(self, event: DepthEvent) -> bool:
         """``U == prev_u + 1``. Ranges chain; single sequence numbers do not."""
-        return self._prev_final_id is None or event.first_id == self._prev_final_id + 1
+        if self._prev_final_id is None:
+            return True
+        return chains(self._prev_final_id, event.first_id)
 
     def gap_detected(self, event: DepthEvent) -> bool:
         """The inverse, and it latches ``snapshot_required``."""
