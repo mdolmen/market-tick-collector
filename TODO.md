@@ -116,10 +116,8 @@ is a legal `Source` and `WorkerApp` ran it untouched, so Phase 0 needed **zero**
 
 ## Phase 8 · Reconciliation
 
-- [ ] Oracle 1: reconstructed book vs venue REST snapshot, periodic — the snapshots are
-      already in the capture as of Phase 1; what is missing is the comparison
-- [ ] Oracle 2: venue's own depth-limited top-N, continuous, on audited symbols — the capture
-      envelope already tags `stream`, so this is a subscription, not a format migration
+- [ ] Oracle 1: reconstructed book vs venue REST snapshot, periodic
+- [ ] Oracle 2: venue's own depth-limited top-N, continuous, on audited symbols
 - [ ] Align oracle 2 by update id, never by clock; keep a ring of recent top-N versions
 - [ ] Compare the top N−1 levels to avoid the truncation boundary artifact
 - [ ] Oracle 3: replay harness injected faults; target detection of 100%
