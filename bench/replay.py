@@ -36,8 +36,9 @@ from typing import cast
 from data_pipeline_core import RunContext
 from data_pipeline_core.ingestion.http import HttpClient
 
+from collector.adapters.binance import BinanceAdapter
 from collector.capture import CaptureRecord
-from collector.transform import BinanceBookTransform
+from collector.transform import BookTransform
 
 # Enough of a run to leave the interpreter warm and the branch predictors
 # settled before anything is timed.
@@ -57,7 +58,7 @@ def _load(path: Path) -> list[CaptureRecord]:
 
 def _drive(records: Sequence[CaptureRecord]) -> tuple[int, int, float]:
     """One unthrottled pass. Returns (frames, rows, elapsed seconds)."""
-    transform = BinanceBookTransform(symbol="BTCUSDT")
+    transform = BookTransform(symbol="BTCUSDT", adapter=BinanceAdapter())
     ctx = RunContext.create(source_name="bench", http=cast(HttpClient, None))
     rows = 0
     started = time.monotonic()

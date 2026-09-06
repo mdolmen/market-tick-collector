@@ -22,6 +22,14 @@ from typing import Literal, TypedDict
 Action = Literal["set", "delete", "snapshot", "gap"]
 Side = Literal["bid", "ask"]
 
+# One scale for every venue, not one per adapter. `price_ticks` is meaningless
+# downstream if its exponent depends on a venue the consumer is not allowed to
+# know, so a per-venue scale would put the venue back on the wrong side of the
+# normalization boundary. Eight is what Phase 2's probe measured on all three
+# venues, on both price and size, and `scaled_int` refuses to truncate — so a
+# venue that ever quotes finer fails the run instead of corrupting a book key.
+SCALE = 8
+
 
 class LevelRow(TypedDict):
     """One price level, or one control event, normalized across venues.

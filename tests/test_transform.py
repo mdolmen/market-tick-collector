@@ -15,14 +15,15 @@ from typing import Any, cast
 from data_pipeline_core import RunContext
 from data_pipeline_core.ingestion.http import HttpClient
 
+from collector.adapters.binance import BinanceAdapter
 from collector.capture import CaptureRecord
 from collector.model import LevelRow
-from collector.transform import BinanceBookTransform
+from collector.transform import BookTransform
 from tests.conftest import capture
 
 
-def run(records: list[CaptureRecord]) -> tuple[list[LevelRow], BinanceBookTransform]:
-    transform = BinanceBookTransform(symbol="BTCUSDT")
+def run(records: list[CaptureRecord]) -> tuple[list[LevelRow], BookTransform]:
+    transform = BookTransform(symbol="BTCUSDT", adapter=BinanceAdapter())
     ctx = RunContext.create(source_name="test", http=cast(HttpClient, None))
     rows = [row for record in records for row in transform.transform(record, ctx)]
     return rows, transform

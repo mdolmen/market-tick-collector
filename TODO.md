@@ -54,16 +54,7 @@ is a legal `Source` and `WorkerApp` ran it untouched, so Phase 0 needed **zero**
 - [ ] Parse RFC3339 fractions directly — `fromisoformat` truncates ns to µs in silence
 - [ ] Measure clock skew per venue and commit the number
 
-`RunContext` carries no metrics handle and `StandardMetrics` is owned by `WorkerApp`, so
-nothing inside a source or transform can export a series today. Skew is *measured* here and
-*exported* in Phase 4, where the metric-surface change is already a deliberate §8 item.
-Doing it twice is worse than doing it once.
-
 ## Phase 2.5 · Kraken
-
-Split out of Phase 2 once the probe showed Kraken's book channel carries no sequence of any
-kind. The checksum is not a supplementary check there, it is the only one — so the adapter
-and the CRC32 are one deliverable and cannot be sequenced apart.
 
 - [ ] Kraken adapter: in-band snapshot, one depth per symbol
 - [ ] CRC32 over the top 10, validated inline, latching `snapshot_required` on mismatch

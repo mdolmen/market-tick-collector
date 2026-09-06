@@ -11,16 +11,21 @@ graceful shutdown and the metrics push all come from ``WorkerApp``.
     MTC_MODE=replay      raw landing -> book -> level rows, no socket
 
 ``collect`` and ``replay`` differ only in where the records come from — the
-same ``BinanceBookTransform`` instance type builds the book either way, which
+same ``BookTransform`` instance type builds the book either way, which
 is what makes a replay a regression test of the collector rather than of a
 parallel implementation.
 
+A venue is a process. Running several at once needs the connection supervisor
+(Phase 3) and ``ServiceApp`` (Phase 4); until then ``MTC_VENUE`` picks the
+adapter and ``WorkerApp``'s one-source contract stays untouched.
+
 Key knobs:
 
-    MTC_SYMBOL           one symbol, Binance spot        (BTCUSDT)
+    MTC_VENUE            binance | coinbase              (binance)
+    MTC_SYMBOL           one symbol, venue-native form   (BTCUSDT)
     MTC_DURATION_S       how long a bounded live run lasts (60)
     MTC_OUTPUT           parquet | console               (parquet)
-    MTC_RAW_CHANNEL      capture/replay channel name     (binance-depth)
+    MTC_RAW_CHANNEL      capture/replay channel name     (<venue>-depth)
     MTC_RAW_BUCKET_URL   where it lands (else RAW_BUCKET_URL)
     MTC_REPLAY_SPEED     1 / 10 / 100, or unset for the ceiling
     MTC_FAULTS           drop,reorder,duplicate,clock_jitter,burst
@@ -42,23 +47,26 @@ from data_pipeline_core import (
 )
 from data_pipeline_core.runtime.logging import get_logger
 
+from collector import adapters
 from collector.capture import CaptureRecord
 from collector.model import LevelRow
 from collector.replay import FaultConfig, ReplaySource
 from collector.settings import CollectorSettings
 from collector.sinks import ConsoleSink
-from collector.source import BinanceFrameSource
-from collector.transform import BinanceBookTransform
+from collector.source import FrameSource
+from collector.transform import BookTransform
 
 
-def _frame_source(settings: CollectorSettings) -> BinanceFrameSource:
-    return BinanceFrameSource(
+def _channel(settings: CollectorSettings) -> str:
+    """One raw-landing channel per venue, so a replay knows what it is reading."""
+    return settings.raw_channel or f"{settings.venue}-depth"
+
+
+def _frame_source(settings: CollectorSettings) -> FrameSource:
+    return FrameSource(
+        venue=adapters.build(settings),
         symbol=settings.symbol,
         duration_s=settings.duration_s,
-        ws_url=settings.ws_url,
-        rest_url=settings.rest_url,
-        snapshot_limit=settings.snapshot_limit,
-        depth_interval_ms=settings.depth_interval_ms,
         snapshot_interval_s=settings.snapshot_interval_s,
     )
 
@@ -78,13 +86,13 @@ def build_capture_app(
 ) -> WorkerApp[CaptureRecord, CaptureRecord]:
     """Ingest worker: the venue's bytes to raw landing, and no book at all."""
     sink: Sink[Mapping[str, object]] = raw_landing_sink(
-        settings.raw_channel, bucket_url=settings.raw_bucket_url
+        _channel(settings), bucket_url=settings.raw_bucket_url
     )
     return WorkerApp(_frame_source(settings), sink, settings=settings)
 
 
 def build_collect_app(
-    settings: CollectorSettings, transform: BinanceBookTransform
+    settings: CollectorSettings, transform: BookTransform
 ) -> WorkerApp[CaptureRecord, LevelRow]:
     """The Phase 0 path: socket to level rows, with the book in between."""
     return WorkerApp(
@@ -96,11 +104,11 @@ def build_collect_app(
 
 
 def build_replay_app(
-    settings: CollectorSettings, transform: BinanceBookTransform
+    settings: CollectorSettings, transform: BookTransform
 ) -> WorkerApp[CaptureRecord, LevelRow]:
     """The same transform, fed from disk instead of from a socket."""
     source = ReplaySource(
-        channel=settings.raw_channel,
+        channel=_channel(settings),
         bucket_url=settings.raw_bucket_url,
         speed=settings.replay_speed,
         faults=FaultConfig.from_names(settings.faults, seed=settings.fault_seed),
@@ -118,7 +126,9 @@ def main() -> int:
     # The transform is held here rather than inside the builder because its
     # counters and the book it ends with are the run's actual result, and
     # ``WorkerApp.run()`` returns only an exit code.
-    transform = BinanceBookTransform(symbol=settings.symbol)
+    transform = BookTransform(
+        symbol=settings.symbol, adapter=adapters.build(settings)
+    )
     build = build_collect_app if settings.mode == "collect" else build_replay_app
     code = build(settings, transform).run()
     get_logger().info("book", mode=settings.mode, **transform.summary())

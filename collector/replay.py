@@ -2,7 +2,7 @@
 
 The point of the whole harness is that nothing downstream of here knows it is
 being replayed: ``ReplaySource`` yields the identical ``CaptureRecord`` stream
-``BinanceFrameSource`` produced, so ``BinanceBookTransform`` is the object
+``FrameSource`` produced, so ``BookTransform`` is the object
 under test rather than a copy of it.
 
 **Faults perturb the transport, never the book.** Every one of them is a

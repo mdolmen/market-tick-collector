@@ -25,8 +25,8 @@ import time
 from collections.abc import Sequence
 from pathlib import Path
 
-from collector.adapters import binance
-from collector.transform import BinanceBookTransform
+from collector.adapters.binance import BinanceAdapter
+from collector.transform import BookTransform
 
 # Enough frames to characterise a percentile without spending len(corpus) *
 # gap seconds on the idle pass.
@@ -34,13 +34,14 @@ IDLE_SAMPLE = 150
 
 
 def _measure(frames: Sequence[str], gap_s: float) -> list[int]:
-    transform = BinanceBookTransform(symbol="BTCUSDT")
+    adapter = BinanceAdapter()
+    transform = BookTransform(symbol="BTCUSDT", adapter=adapter)
     latencies: list[int] = []
     for text in frames:
         if gap_s:
             time.sleep(gap_s)
         started = time.monotonic_ns()
-        event = binance.parse_event(json.loads(text), receive_ts=0, monotonic_ts=0)
+        event = adapter.parse_frame(json.loads(text), receive_ts=0, monotonic_ts=0)
         # The collector's own row construction, deliberately not a copy of it.
         transform.level_rows(event)
         latencies.append(time.monotonic_ns() - started)

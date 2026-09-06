@@ -19,7 +19,11 @@ class CollectorSettings(Settings):
         env_prefix="MTC_", env_file=".env", extra="ignore"
     )
 
-    # One venue, one symbol, one bounded run — the whole of Phase 0's scope.
+    # One venue, one symbol, one bounded run. Several venues at once needs the
+    # connection supervisor (Phase 3) and ``ServiceApp`` (Phase 4); until then
+    # a venue is a process, which keeps ``WorkerApp``'s one-source contract
+    # untouched.
+    venue: Literal["binance", "coinbase"] = "binance"
     symbol: str = "BTCUSDT"
     duration_s: float = 60.0
 
@@ -34,8 +38,11 @@ class CollectorSettings(Settings):
     # it is what Phase 8's periodic REST oracle reads. Zero disables it.
     snapshot_interval_s: float = 300.0
 
-    ws_url: str = "wss://stream.binance.com:9443/ws"
-    rest_url: str = "https://api.binance.com/api/v3/depth"
+    # Endpoints live on the adapter, which is where a venue's transport
+    # belongs; these override them, for pointing a run at a testnet or a
+    # recorded fixture server. Empty means "use the adapter's own".
+    ws_url: str = ""
+    rest_url: str = ""
 
     dataset: str = "l2"
     table_name: str = "levels"
@@ -54,7 +61,12 @@ class CollectorSettings(Settings):
     # Where a capture lands and a replay reads from. The bucket falls back to
     # the SDK's own RAW_BUCKET_URL when unset, which is how a local
     # file:// dir and a gs:// bucket stay the same code.
-    raw_channel: str = "binance-depth"
+    #
+    # One channel per venue, defaulted from ``venue`` when left empty. That is
+    # why ``CaptureRecord`` carries no venue field: the channel already says,
+    # a replay resolves its adapter from the same setting, and adding one would
+    # have been a format change for information the path already holds.
+    raw_channel: str = ""
     raw_bucket_url: str | None = None
 
     # Paced replay: the capture's own inter-arrival gaps divided by this. None

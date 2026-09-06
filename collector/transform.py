@@ -1,24 +1,30 @@
-"""``BinanceBookTransform`` — capture records in, normalized level rows out.
+"""``BookTransform`` — capture records in, normalized level rows out.
 
-This is the whole of the book: the splice, the state machine, the adapter and
-the row construction, lifted out of ``source.py`` so that **the live path and
-the replay path run the same object**. Phase 0 had them fused, which meant a
-replay harness would have been a second implementation of the thing it was
-supposed to be testing.
+This is the whole of the book: the bootstrap, the state machine and the row
+construction, lifted out of ``source.py`` so that **the live path and the
+replay path run the same object**. Phase 0 had them fused, which meant a replay
+harness would have been a second implementation of the thing it was supposed to
+be testing.
 
-It does no I/O, and that is the load-bearing property. A snapshot arrives as a
-record on the stream rather than as a ``ctx.http`` call, so a replay
-bootstraps cold from disk with no network at all. The cost is that this class
-cannot ask for a snapshot when it wants one — it waits for the capture to
-contain the next one, and ``BinanceFrameSource`` is what guarantees the capture
-does. See that module on why both sides consult the chain rule.
+**It has no idea which venue it is reconstructing.** Everything venue-shaped
+reaches it through a ``VenueAdapter``, and the only trace of a venue in the
+rows it emits is the ``venue`` label the adapter supplies. That is the
+normalization boundary of ``CLAUDE.md``, and ``tests/test_boundary.py`` is what
+keeps it from eroding back.
+
+It does no I/O either, and that is the load-bearing property. A snapshot
+arrives as a record on the stream rather than as a ``ctx.http`` call, so a
+replay bootstraps cold from disk with no network at all. The cost is that this
+class cannot ask for a snapshot when it wants one — it waits for the capture to
+contain the next one, and ``FrameSource`` is what guarantees the capture does.
+See that module on why both sides consult the chain rule.
 
 The state machine of ``NOTES.md`` § *The state machine is the artifact*, with
 the capture record kinds that drive each edge:
 
-    BUFFERING --(snapshot record)--> SYNCING --(splice READY)--> LIVE
-       ^                                                          |
-       +---------------(gap: chain broken on a frame)-------------+
+    BUFFERING --(snapshot record)--> SYNCING --(bootstrap READY)--> LIVE
+       ^                                                             |
+       +----------------(gap: chain broken on a frame)---------------+
 
 No latency accounting lives here. In a replay ``monotonic_ts`` is the *capture*
 clock, so ``now - event.monotonic_ts`` would measure the age of the recording;
@@ -31,13 +37,12 @@ from collections.abc import Iterator
 
 from data_pipeline_core import RunContext
 
-from collector.adapters import binance
-from collector.adapters.binance import (
-    BinanceDepthAdapter,
-    DepthEvent,
+from collector.adapters.base import (
+    BootstrapOutcome,
     Level,
     Snapshot,
-    SpliceOutcome,
+    Update,
+    VenueAdapter,
 )
 from collector.book import Book
 from collector.capture import CaptureRecord, payload_of
@@ -49,15 +54,15 @@ from collector.model import LevelRow, Side
 _SANITY_EVERY = 100
 
 
-class BinanceBookTransform:
+class BookTransform:
     """Rebuild one symbol's book from captured frames and emit level rows."""
 
-    def __init__(self, *, symbol: str) -> None:
+    def __init__(self, *, symbol: str, adapter: VenueAdapter) -> None:
         self.symbol = symbol.upper()
 
-        self._adapter = BinanceDepthAdapter()
+        self._adapter = adapter
         self._book = Book()
-        self._buffered: list[DepthEvent] = []
+        self._buffered: list[Update] = []
         self._snapshot: Snapshot | None = None
         self._live = False
 
@@ -80,7 +85,7 @@ class BinanceBookTransform:
         """One capture record in, zero or more level rows out.
 
         Zero is the common case while buffering: nothing may be applied until
-        the splice has located the snapshot inside the stream, and then a whole
+        the bootstrap has located the snapshot inside the stream, and then a whole
         bootstrap's worth of rows leaves at once.
         """
         if record["kind"] == "snapshot":
@@ -103,20 +108,20 @@ class BinanceBookTransform:
         with. They are Oracle 1's data and a repair held in reserve.
 
         When the book *is* untrusted the buffer is deliberately not cleared:
-        ``splice`` discards whatever is entirely in the past by itself, and a
+        ``bootstrap`` discards whatever is entirely in the past by itself, and a
         frame straddling the new snapshot is exactly what it is looking for.
         """
-        self._snapshot = binance.parse_snapshot(
+        self._snapshot = self._adapter.parse_snapshot(
             payload_of(record),
             receive_ts=record["receive_ts"],
             monotonic_ts=record["monotonic_ts"],
         )
         if self._live:
             return
-        yield from self._try_splice(ctx)
+        yield from self._try_bootstrap(ctx)
 
     def _on_frame(self, record: CaptureRecord, ctx: RunContext) -> Iterator[LevelRow]:
-        event = binance.parse_event(
+        event = self._adapter.parse_frame(
             payload_of(record),
             receive_ts=record["receive_ts"],
             monotonic_ts=record["monotonic_ts"],
@@ -126,7 +131,7 @@ class BinanceBookTransform:
         if not self._live:
             self.untrusted_frames += 1
             self._buffered.append(event)
-            yield from self._try_splice(ctx)
+            yield from self._try_bootstrap(ctx)
             return
 
         if self._adapter.gap_detected(event):
@@ -134,7 +139,7 @@ class BinanceBookTransform:
             # only measurable if the untrusted interval has both edges in the
             # data. The next snapshot record closes it.
             self.gaps += 1
-            ctx.logger.warning("gap detected", first_id=event.first_id)
+            ctx.logger.warning("gap detected", first_seq=event.first_seq)
             self._live = False
             self._buffered = [event]
             yield self._gap_row(event)
@@ -142,7 +147,7 @@ class BinanceBookTransform:
 
         yield from self._apply(event)
 
-    def _try_splice(self, ctx: RunContext) -> Iterator[LevelRow]:
+    def _try_bootstrap(self, ctx: RunContext) -> Iterator[LevelRow]:
         """Locate the snapshot inside the buffer, and bootstrap if it is there.
 
         The two failure branches get genuinely different treatment, which is
@@ -153,15 +158,15 @@ class BinanceBookTransform:
         """
         if self._snapshot is None:
             return
-        result = binance.splice(self._buffered, self._snapshot.last_update_id)
-        if result.outcome is SpliceOutcome.SNAPSHOT_TOO_OLD:
+        result = self._adapter.bootstrap(self._buffered, self._snapshot)
+        if result.outcome is BootstrapOutcome.SNAPSHOT_TOO_OLD:
             ctx.logger.warning(
                 "snapshot too old, waiting for the next one",
-                last_update_id=self._snapshot.last_update_id,
-                buffer_first_id=self._buffered[0].first_id,
+                snapshot_seq=self._snapshot.final_seq,
+                buffer_first_seq=self._buffered[0].first_seq,
             )
             return
-        if result.outcome is not SpliceOutcome.READY:
+        if result.outcome is not BootstrapOutcome.READY:
             return
 
         self.bootstraps += 1
@@ -169,7 +174,7 @@ class BinanceBookTransform:
         self._adapter.bootstrapped()
         ctx.logger.info(
             "bootstrapped",
-            last_update_id=self._snapshot.last_update_id,
+            snapshot_seq=self._snapshot.final_seq,
             buffered=len(self._buffered),
             discarded=result.start,
         )
@@ -180,7 +185,7 @@ class BinanceBookTransform:
         for event in applicable:
             yield from self._apply(event)
 
-    def _apply(self, event: DepthEvent) -> Iterator[LevelRow]:
+    def _apply(self, event: Update) -> Iterator[LevelRow]:
         rows = self.level_rows(event)
         self._adapter.accept(event)
         self.rows += len(rows)
@@ -192,7 +197,7 @@ class BinanceBookTransform:
 
     # --- rows --------------------------------------------------------------
 
-    def level_rows(self, event: DepthEvent) -> list[LevelRow]:
+    def level_rows(self, event: Update) -> list[LevelRow]:
         """One frame's worth of rows, and the book write that goes with them.
 
         Public because it is the per-frame normalization cost on its own, and
@@ -209,9 +214,9 @@ class BinanceBookTransform:
                 self._book.apply(side, level.price_ticks, level.size_lots)
                 rows.append(
                     LevelRow(
-                        venue=binance.VENUE,
+                        venue=self._adapter.venue,
                         symbol=self.symbol,
-                        seq=event.final_id,
+                        seq=event.final_seq,
                         exchange_ts=event.exchange_ts,
                         receive_ts=event.receive_ts,
                         monotonic_ts=event.monotonic_ts,
@@ -235,9 +240,9 @@ class BinanceBookTransform:
                 self._book.apply(side, level.price_ticks, level.size_lots)
                 self.rows += 1
                 yield LevelRow(
-                    venue=binance.VENUE,
+                    venue=self._adapter.venue,
                     symbol=self.symbol,
-                    seq=snapshot.last_update_id,
+                    seq=snapshot.final_seq,
                     # Binance's REST depth response carries no clock of its own.
                     exchange_ts=None,
                     receive_ts=snapshot.receive_ts,
@@ -250,13 +255,13 @@ class BinanceBookTransform:
                     size_lots=level.size_lots,
                 )
 
-    def _gap_row(self, event: DepthEvent) -> LevelRow:
+    def _gap_row(self, event: Update) -> LevelRow:
         """A control record: it describes no price level, so those fields are null."""
         self.rows += 1
         return LevelRow(
-            venue=binance.VENUE,
+            venue=self._adapter.venue,
             symbol=self.symbol,
-            seq=event.first_id,
+            seq=event.first_seq,
             exchange_ts=event.exchange_ts,
             receive_ts=event.receive_ts,
             monotonic_ts=event.monotonic_ts,

@@ -1,9 +1,9 @@
-"""``BinanceFrameSource`` — the socket and the REST fetch, and nothing else.
+"""``FrameSource`` — the socket and, where a venue needs one, the REST fetch.
 
 An ingest worker in the SDK's sense (``ARCHITECTURE.md`` § *Two archetypes*):
 it produces the venue's bytes wrapped in a ``CaptureRecord`` and never builds a
 book. Wired to ``raw_landing_sink`` it is a capture run; wired to a curated
-sink with ``BinanceBookTransform`` it is the Phase 0 collector, unchanged in
+sink with ``BookTransform`` it is the Phase 0 collector, unchanged in
 behaviour. The split is what lets a replay drive the *same* transform from
 disk instead of from a socket.
 
@@ -12,15 +12,23 @@ Bounded is still the point. ``WorkerApp`` runs a single pass and calls
 fits the existing SDK contract untouched. The ``ServiceApp`` a real always-on
 collector demands is Phase 4's problem.
 
-**Why this class watches the sequence at all.** It must not build a book, but
-it must know when to fetch a snapshot — because a capture that lacks a snapshot
-at every point one is needed cannot be replayed cold, and the transform (which
-does no I/O) can never ask for one. So both sides consult
-``binance.chains``, and they ask it different questions: this one asks *did the
-socket skip, so should I fetch*, the transform asks *is the book still
-trustworthy*. One venue rule, one definition, two decisions. The alternative —
-a back-channel from transform to source — does not exist in the ``Transform``
-protocol and would put I/O back in the transform, which is what breaks replay.
+**Two snapshot paths, and the venue picks which.** ``snapshot_request()``
+returning a request means the snapshot arrives out of band over REST, and this
+class has to decide when to fetch one — Binance. Returning ``None`` means the
+venue sends its own on the socket, and this class fetches nothing at all and
+merely classifies what arrives — Coinbase. That is the only branch in here, and
+it is a genuine transport difference rather than a venue special case.
+
+**Why this class watches the sequence at all**, on the out-of-band path. It
+must not build a book, but it must know when to fetch a snapshot — because a
+capture that lacks a snapshot at every point one is needed cannot be replayed
+cold, and the transform (which does no I/O) can never ask for one. So both
+sides consult the adapter's ``chains``, and they ask it different questions:
+this one asks *did the socket skip, so should I fetch*, the transform asks *is
+the book still trustworthy*. One venue rule, one definition, two decisions. The
+alternative — a back-channel from transform to source — does not exist in the
+``Transform`` protocol and would put I/O back in the transform, which is what
+breaks replay.
 
 Two things here that Phase 5 replaces rather than extends. The socket's read
 buffer is whatever ``websockets`` provides (a small internal queue), not the
@@ -39,7 +47,7 @@ from typing import Any
 from data_pipeline_core import RunContext
 from websockets.sync.client import ClientConnection, connect
 
-from collector.adapters import binance
+from collector.adapters.base import Venue
 from collector.capture import CaptureRecord, Kind
 
 # A refetch that keeps landing behind the buffer means something is wrong with
@@ -54,48 +62,57 @@ _RECV_SLICE_S = 1.0
 # in full — a dead tail longer than a short run.
 _CLOSE_TIMEOUT_S = 2.0
 
+# ``websockets`` caps a message at 1 MiB by default and closes the connection
+# when one exceeds it. A venue that sends its snapshot in band goes straight
+# through that — Coinbase's BTC-USD book measured ~4.9 MB in Phase 2's probe,
+# and the first run died 0.7s in with `1009 (message too big)`. Raised rather
+# than disabled: unbounded lets a venue drive our allocator.
+_MAX_MESSAGE_BYTES = 16 * 1024 * 1024
 
-class BinanceFrameSource:
-    """Stream one symbol's diff frames, with a snapshot whenever one is due."""
 
-    name = "binance-depth"
+class FrameSource:
+    """Stream one symbol's frames, with a snapshot whenever one is due."""
 
     def __init__(
         self,
         *,
+        venue: Venue,
         symbol: str,
         duration_s: float,
-        ws_url: str,
-        rest_url: str,
-        snapshot_limit: int,
-        depth_interval_ms: int,
         snapshot_interval_s: float = 0.0,
     ) -> None:
+        self._venue = venue
         self.symbol = symbol.upper()
+        self.name = f"{venue.venue}-depth"
         self._duration_s = duration_s
-        self._ws_url = ws_url.rstrip("/")
-        self._rest_url = rest_url
-        self._snapshot_limit = snapshot_limit
         self._snapshot_interval_s = snapshot_interval_s
-        self._stream = binance.stream_name(self.symbol, depth_interval_ms)
+        self._stream = venue.stream_tag(self.symbol)
+        self._snapshot_request = venue.snapshot_request(self.symbol)
 
         self._seq = 0
         self._frames = 0
         self._snapshots = 0
-        # The last received frame's ``u``, and the first ``U`` seen since the
-        # most recent snapshot was fetched — the two ids the fetch decision
-        # needs, and the only sequence state this class keeps.
-        self._prev_final_id: int | None = None
-        self._first_id_since_snapshot: int | None = None
-        self._last_update_id: int | None = None
+        self._control = 0
+        # The last received frame's final id, and the first id seen since the
+        # most recent snapshot was fetched — the two the fetch decision needs,
+        # and the only sequence state this class keeps. Both stay None on a
+        # venue whose snapshot arrives in band, where there is no fetch to
+        # decide about.
+        self._prev_final_seq: int | None = None
+        self._first_seq_since_snapshot: int | None = None
+        self._snapshot_seq: int | None = None
         self._skipped = False
         self._refetches = 0
         self._last_snapshot_at = 0.0
 
     def fetch(self, ctx: RunContext) -> Iterator[CaptureRecord]:
         with connect(
-            f"{self._ws_url}/{self._stream}", close_timeout=_CLOSE_TIMEOUT_S
+            self._venue.ws_url(self.symbol),
+            close_timeout=_CLOSE_TIMEOUT_S,
+            max_size=_MAX_MESSAGE_BYTES,
         ) as ws:
+            for frame in self._venue.subscribe_frames(self.symbol):
+                ws.send(frame)
             ctx.logger.info(
                 "connected", stream=self._stream, deadline_s=self._duration_s
             )
@@ -105,12 +122,14 @@ class BinanceFrameSource:
             deadline = started + self._duration_s
             # Socket first, snapshot second. The other order loses every diff
             # that lands during the fetch and starts the book silently corrupt.
-            yield self._snapshot_record(ctx)
+            # In-band venues get this ordering from the venue for free.
+            if self._snapshot_request is not None:
+                yield self._snapshot_record(ctx)
             while True:
-                frame = self._recv(ws, ctx, deadline)
-                if frame is None:
+                record = self._recv(ws, ctx, deadline)
+                if record is None:
                     break
-                yield frame
+                yield record
                 if self._snapshot_due(ctx):
                     yield self._snapshot_record(ctx)
             self._report(ctx, time.monotonic() - started)
@@ -120,7 +139,13 @@ class BinanceFrameSource:
     def _recv(
         self, ws: ClientConnection, ctx: RunContext, deadline: float
     ) -> CaptureRecord | None:
-        """Next frame, or None once the duration is up or a SIGTERM arrived."""
+        """Next landable record, or None once the duration is up or a SIGTERM.
+
+        Control traffic — subscription acks, heartbeats, status — is counted
+        and dropped here rather than landed. It carries no book state, and
+        landing it would put messages in a capture that the replay's fault
+        injector would then have to know to leave alone.
+        """
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0 or ctx.should_stop():
@@ -132,43 +157,60 @@ class BinanceFrameSource:
             receive_ts = time.time_ns()
             monotonic_ts = time.monotonic_ns()
             text = message if isinstance(message, str) else message.decode()
-            self._frames += 1
             # stdlib json on purpose: it is the baseline bench/decode.py
-            # measures the alternatives against. Only the two chain ids are
-            # read — the record model is the transform's cost, not the
-            # capture worker's.
-            first_id, final_id = binance.chain_ids(json.loads(text))
-            # Judged against the *previous* frame, so it has to happen here,
-            # before the cursor moves.
-            self._skipped = self._prev_final_id is not None and not binance.chains(
-                self._prev_final_id, first_id
-            )
-            self._prev_final_id = final_id
-            if self._first_id_since_snapshot is None:
-                self._first_id_since_snapshot = first_id
+            # measures the alternatives against. Only the ids are read — the
+            # record model is the transform's cost, not the capture worker's.
+            payload = json.loads(text)
+            kind = self._venue.classify(self._stream, payload)
+            if kind is None:
+                self._control += 1
+                continue
+            self._track(kind, payload)
             return self._record(
                 stream=self._stream,
-                kind="frame",
+                kind=kind,
                 receive_ts=receive_ts,
                 monotonic_ts=monotonic_ts,
                 payload=text,
             )
+
+    def _track(self, kind: Kind, payload: Any) -> None:
+        """Advance the fetch-decision state. No-op with no fetch to decide."""
+        if kind == "snapshot":
+            self._snapshots += 1
+            return
+        self._frames += 1
+        if self._snapshot_request is None:
+            return
+        first_seq, final_seq = self._venue.sequence_ids(payload)
+        # Judged against the *previous* frame, so it has to happen before the
+        # cursor moves.
+        self._skipped = self._prev_final_seq is not None and not self._venue.chains(
+            self._prev_final_seq, first_seq
+        )
+        self._prev_final_seq = final_seq
+        if self._first_seq_since_snapshot is None:
+            self._first_seq_since_snapshot = first_seq
 
     # --- deciding when to snapshot -----------------------------------------
 
     def _snapshot_due(self, ctx: RunContext) -> bool:
         """True when the capture needs a fresh snapshot to stay replayable.
 
-        Two conditions, and they are the two failure branches of the splice
+        Two conditions, and they are the two failure branches of the bootstrap
         seen from the I/O side. A snapshot that predates the first frame since
         it was fetched has already lost updates and no amount of further
         buffering fixes it. A break in the chain means the socket skipped, and
         the book downstream is about to go untrusted with nothing to repair it.
+
+        A venue that sends its own snapshot never reaches any of this.
         """
-        if self._last_update_id is None or self._first_id_since_snapshot is None:
+        if self._snapshot_request is None:
             return False
-        if binance.snapshot_too_old(
-            self._first_id_since_snapshot, self._last_update_id
+        if self._snapshot_seq is None or self._first_seq_since_snapshot is None:
+            return False
+        if self._venue.snapshot_stale(
+            self._first_seq_since_snapshot, self._snapshot_seq
         ):
             self._refetches += 1
             if self._refetches > _MAX_SNAPSHOT_REFETCHES:
@@ -178,8 +220,8 @@ class BinanceFrameSource:
                 )
             ctx.logger.warning(
                 "snapshot too old, refetching",
-                last_update_id=self._last_update_id,
-                buffer_first_id=self._first_id_since_snapshot,
+                snapshot_seq=self._snapshot_seq,
+                buffer_first_seq=self._first_seq_since_snapshot,
                 attempt=self._refetches,
             )
             return True
@@ -215,19 +257,18 @@ class BinanceFrameSource:
         The websocket gets none of that, and that asymmetry is the argument for
         the connection supervisor in Phase 3.
         """
-        response = ctx.http.get(
-            self._rest_url,
-            params={"symbol": self.symbol, "limit": self._snapshot_limit},
-        )
+        request = self._snapshot_request
+        assert request is not None  # only the out-of-band path gets here
+        response = ctx.http.get(request.url, params=dict(request.params))
         if response.status_code != 200:
             raise RuntimeError(f"depth snapshot returned {response.status_code}")
         payload: dict[str, Any] = response.json()
         self._snapshots += 1
-        self._last_update_id = int(payload["lastUpdateId"])
-        self._first_id_since_snapshot = None
+        self._snapshot_seq = self._venue.snapshot_seq(payload)
+        self._first_seq_since_snapshot = None
         self._last_snapshot_at = time.monotonic()
         return self._record(
-            stream=binance.REST_DEPTH_STREAM,
+            stream=request.stream,
             kind="snapshot",
             receive_ts=time.time_ns(),
             monotonic_ts=time.monotonic_ns(),
@@ -258,10 +299,12 @@ class BinanceFrameSource:
     def _report(self, ctx: RunContext, elapsed_s: float) -> None:
         ctx.logger.info(
             "capture finished",
+            venue=self._venue.venue,
             symbol=self.symbol,
             stream=self._stream,
             elapsed_s=round(elapsed_s, 3),
             frames=self._frames,
             frames_per_s=round(self._frames / elapsed_s, 1) if elapsed_s else 0.0,
             snapshots=self._snapshots,
+            control=self._control,
         )

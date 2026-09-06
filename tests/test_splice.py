@@ -15,24 +15,36 @@ from pathlib import Path
 
 import pytest
 
-from collector.adapters.binance import (
-    BinanceDepthAdapter,
-    DepthEvent,
-    Snapshot,
-    SpliceOutcome,
-    parse_event,
-    parse_snapshot,
-    splice,
-)
+from collector.adapters.base import BootstrapOutcome, BootstrapResult, Snapshot, Update
+from collector.adapters.binance import BinanceAdapter
 
 _FIXTURES = Path(__file__).parent / "fixtures"
 
 
+def splice(buffered: list[Update], last_update_id: int) -> BootstrapResult:
+    """`bootstrap` against a bare sequence id.
+
+    The adapter takes the whole `Snapshot` because that is what the transform
+    holds; these tests care only about where the id falls in the buffer, so
+    they wrap it rather than build a book state they never read.
+    """
+    snapshot = Snapshot(
+        final_seq=last_update_id,
+        exchange_ts=None,
+        receive_ts=0,
+        monotonic_ts=0,
+        bids=(),
+        asks=(),
+    )
+    return BinanceAdapter().bootstrap(buffered, snapshot)
+
+
 @pytest.fixture(scope="module")
-def frames() -> list[DepthEvent]:
+def frames() -> list[Update]:
     lines = (_FIXTURES / "binance_depth_frames.jsonl").read_text().splitlines()
+    adapter = BinanceAdapter()
     return [
-        parse_event(json.loads(line), receive_ts=index, monotonic_ts=index)
+        adapter.parse_frame(json.loads(line), receive_ts=index, monotonic_ts=index)
         for index, line in enumerate(lines)
         if line.strip()
     ]
@@ -41,44 +53,44 @@ def frames() -> list[DepthEvent]:
 @pytest.fixture(scope="module")
 def snapshot() -> Snapshot:
     payload = json.loads((_FIXTURES / "binance_depth_snapshot.json").read_text())
-    return parse_snapshot(payload, receive_ts=0, monotonic_ts=0)
+    return BinanceAdapter().parse_snapshot(payload, receive_ts=0, monotonic_ts=0)
 
 
-def test_the_recording_is_a_contiguous_chain(frames: list[DepthEvent]) -> None:
+def test_the_recording_is_a_contiguous_chain(frames: list[Update]) -> None:
     # If this fails the fixture is not a clean capture and every other
     # assertion below is measuring the wrong thing.
     for previous, event in pairwise(frames):
-        assert event.first_id == previous.final_id + 1
+        assert event.first_seq == previous.final_seq + 1
 
 
 # --- branch 1 + 2: discard the past, start from the straddler ----------------
 
 
 def test_ready_discards_the_past_and_starts_at_the_straddler(
-    frames: list[DepthEvent], snapshot: Snapshot
+    frames: list[Update], snapshot: Snapshot
 ) -> None:
-    result = splice(frames, snapshot.last_update_id)
+    result = splice(frames, snapshot.final_seq)
 
-    assert result.outcome is SpliceOutcome.READY
+    assert result.outcome is BootstrapOutcome.READY
     straddler = frames[result.start]
-    assert straddler.first_id <= snapshot.last_update_id + 1 <= straddler.final_id
+    assert straddler.first_seq <= snapshot.final_seq + 1 <= straddler.final_seq
     # Everything before it is entirely in the past and was discarded.
-    assert all(e.final_id <= snapshot.last_update_id for e in frames[: result.start])
+    assert all(e.final_seq <= snapshot.final_seq for e in frames[: result.start])
 
 
 def test_ready_when_the_snapshot_lands_inside_a_frame(
-    frames: list[DepthEvent],
+    frames: list[Update],
 ) -> None:
     # A frame batches several internal updates, so the snapshot position
     # normally falls *within* a range rather than on its edge. Here: strictly
     # inside the last recorded frame.
     inside = frames[-1]
-    last_update_id = (inside.first_id + inside.final_id) // 2
-    assert inside.first_id < last_update_id < inside.final_id
+    last_update_id = (inside.first_seq + inside.final_seq) // 2
+    assert inside.first_seq < last_update_id < inside.final_seq
 
     result = splice(frames, last_update_id)
 
-    assert result.outcome is SpliceOutcome.READY
+    assert result.outcome is BootstrapOutcome.READY
     assert frames[result.start] is inside
 
 
@@ -86,23 +98,23 @@ def test_ready_when_the_snapshot_lands_inside_a_frame(
 
 
 def test_snapshot_too_old_when_the_buffer_starts_ahead(
-    frames: list[DepthEvent],
+    frames: list[Update],
 ) -> None:
     # Updates between the snapshot and the first buffered frame are already
     # lost, so no amount of further buffering helps: refetch the snapshot.
-    result = splice(frames, frames[0].first_id - 2)
+    result = splice(frames, frames[0].first_seq - 2)
 
-    assert result.outcome is SpliceOutcome.SNAPSHOT_TOO_OLD
+    assert result.outcome is BootstrapOutcome.SNAPSHOT_TOO_OLD
 
 
 def test_a_snapshot_exactly_one_before_the_buffer_is_not_too_old(
-    frames: list[DepthEvent],
+    frames: list[Update],
 ) -> None:
     # The boundary: S + 1 == U means the first frame continues the snapshot
     # with nothing missing between them.
-    result = splice(frames, frames[0].first_id - 1)
+    result = splice(frames, frames[0].first_seq - 1)
 
-    assert result.outcome is SpliceOutcome.READY
+    assert result.outcome is BootstrapOutcome.READY
     assert result.start == 0
 
 
@@ -110,24 +122,24 @@ def test_a_snapshot_exactly_one_before_the_buffer_is_not_too_old(
 
 
 def test_buffer_behind_when_every_frame_is_in_the_past(
-    frames: list[DepthEvent],
+    frames: list[Update],
 ) -> None:
     # The snapshot is fine; the buffer simply has not caught up. Refetching
     # here is what makes a bootstrap loop spin.
-    result = splice(frames, frames[-1].final_id)
+    result = splice(frames, frames[-1].final_seq)
 
-    assert result.outcome is SpliceOutcome.BUFFER_BEHIND
+    assert result.outcome is BootstrapOutcome.BUFFER_BEHIND
 
 
 def test_buffer_behind_on_an_empty_buffer() -> None:
-    assert splice([], 1).outcome is SpliceOutcome.BUFFER_BEHIND
+    assert splice([], 1).outcome is BootstrapOutcome.BUFFER_BEHIND
 
 
 # --- the gap rule: U == prev_u + 1 -----------------------------------------
 
 
-def test_consecutive_frames_are_in_sequence(frames: list[DepthEvent]) -> None:
-    adapter = BinanceDepthAdapter()
+def test_consecutive_frames_are_in_sequence(frames: list[Update]) -> None:
+    adapter = BinanceAdapter()
     adapter.bootstrapped()
 
     for event in frames:
@@ -138,9 +150,9 @@ def test_consecutive_frames_are_in_sequence(frames: list[DepthEvent]) -> None:
 
 
 def test_a_skipped_frame_is_a_gap_and_latches_snapshot_required(
-    frames: list[DepthEvent],
+    frames: list[Update],
 ) -> None:
-    adapter = BinanceDepthAdapter()
+    adapter = BinanceAdapter()
     adapter.bootstrapped()
     adapter.accept(frames[0])
 
@@ -149,9 +161,9 @@ def test_a_skipped_frame_is_a_gap_and_latches_snapshot_required(
 
 
 def test_snapshot_required_stays_latched_past_the_frame_that_broke_the_chain(
-    frames: list[DepthEvent],
+    frames: list[Update],
 ) -> None:
-    adapter = BinanceDepthAdapter()
+    adapter = BinanceAdapter()
     adapter.bootstrapped()
     adapter.accept(frames[0])
     adapter.gap_detected(frames[2])
@@ -164,15 +176,15 @@ def test_snapshot_required_stays_latched_past_the_frame_that_broke_the_chain(
 
 
 def test_a_fresh_adapter_requires_a_snapshot() -> None:
-    assert BinanceDepthAdapter().snapshot_required()
+    assert BinanceAdapter().snapshot_required()
 
 
 def test_the_straddler_is_not_judged_by_the_chain_rule(
-    frames: list[DepthEvent],
+    frames: list[Update],
 ) -> None:
     # The splice validated it, and its U legitimately starts before S + 1, so
     # the chain rule would reject the one event already proven correct.
-    adapter = BinanceDepthAdapter()
+    adapter = BinanceAdapter()
     adapter.bootstrapped()
 
     assert not adapter.gap_detected(frames[5])

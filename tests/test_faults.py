@@ -27,10 +27,11 @@ from typing import cast
 from data_pipeline_core import RunContext
 from data_pipeline_core.ingestion.http import HttpClient
 
+from collector.adapters.binance import BinanceAdapter
 from collector.capture import CaptureRecord
 from collector.model import LevelRow
 from collector.replay import FaultConfig, FaultInjector
-from collector.transform import BinanceBookTransform
+from collector.transform import BookTransform
 from tests.conftest import synthetic_capture
 
 # A session long enough that a fault can sit well inside a live stretch, with
@@ -55,14 +56,14 @@ def _at(records: list[CaptureRecord], frame_index: int) -> int:
     return _frame_positions(records)[frame_index]
 
 
-def _run(records: list[CaptureRecord]) -> tuple[list[LevelRow], BinanceBookTransform]:
-    transform = BinanceBookTransform(symbol="BTCUSDT")
+def _run(records: list[CaptureRecord]) -> tuple[list[LevelRow], BookTransform]:
+    transform = BookTransform(symbol="BTCUSDT", adapter=BinanceAdapter())
     ctx = RunContext.create(source_name="test", http=cast(HttpClient, None))
     rows = [row for record in records for row in transform.transform(record, ctx)]
     return rows, transform
 
 
-def _book(transform: BinanceBookTransform) -> tuple[dict[int, int], dict[int, int]]:
+def _book(transform: BookTransform) -> tuple[dict[int, int], dict[int, int]]:
     return dict(transform.book.bids), dict(transform.book.asks)
 
 

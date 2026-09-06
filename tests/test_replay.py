@@ -15,10 +15,11 @@ from typing import cast
 from data_pipeline_core import RunContext
 from data_pipeline_core.ingestion.http import HttpClient
 
+from collector.adapters.binance import BinanceAdapter
 from collector.capture import CaptureRecord
 from collector.model import LevelRow
 from collector.replay import FaultConfig, ReplaySource
-from collector.transform import BinanceBookTransform
+from collector.transform import BookTransform
 from tests.conftest import synthetic_capture
 
 CHANNEL = "test-depth"
@@ -35,9 +36,9 @@ def land(records: list[CaptureRecord], tmp_path: Path) -> str:
 
 def replay(
     bucket_url: str, *, faults: FaultConfig | None = None
-) -> tuple[list[LevelRow], BinanceBookTransform, ReplaySource]:
+) -> tuple[list[LevelRow], BookTransform, ReplaySource]:
     source = ReplaySource(channel=CHANNEL, bucket_url=bucket_url, faults=faults)
-    transform = BinanceBookTransform(symbol="BTCUSDT")
+    transform = BookTransform(symbol="BTCUSDT", adapter=BinanceAdapter())
     ctx = RunContext.create(source_name="test", http=cast(HttpClient, None))
     rows = [row for r in source.fetch(ctx) for row in transform.transform(r, ctx)]
     return rows, transform, source
@@ -61,7 +62,7 @@ def test_replay_matches_the_same_records_in_memory(tmp_path: Path) -> None:
     """Going through the SDK's raw landing changes nothing about the result."""
     records = synthetic_capture(count=40, snapshot_every=10)
 
-    direct = BinanceBookTransform(symbol="BTCUSDT")
+    direct = BookTransform(symbol="BTCUSDT", adapter=BinanceAdapter())
     ctx = RunContext.create(source_name="test", http=cast(HttpClient, None))
     expected = [row for r in records for row in direct.transform(r, ctx)]
 

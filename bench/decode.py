@@ -31,8 +31,7 @@ from typing import Any
 import msgspec
 import orjson
 
-from collector.adapters.binance import PRICE_SCALE, SIZE_SCALE
-from collector.model import scaled_int
+from collector.model import SCALE, scaled_int
 
 REPEATS = 5
 
@@ -51,14 +50,14 @@ def _scale(payload: Any) -> int:
     """The per-level work the collector does after any decoder returns."""
     total = 0
     for price, size in (*payload["b"], *payload["a"]):
-        total += scaled_int(price, PRICE_SCALE) + scaled_int(size, SIZE_SCALE)
+        total += scaled_int(price, SCALE) + scaled_int(size, SCALE)
     return total
 
 
 def _scale_typed(frame: DepthFrame) -> int:
     total = 0
     for price, size in (*frame.b, *frame.a):
-        total += scaled_int(price, PRICE_SCALE) + scaled_int(size, SIZE_SCALE)
+        total += scaled_int(price, SCALE) + scaled_int(size, SCALE)
     return total
 
 

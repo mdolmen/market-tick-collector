@@ -18,8 +18,9 @@ from data_pipeline_core.ingestion.http import HttpClient
 
 from collector import source as source_module
 from collector.adapters import binance
+from collector.adapters.binance import BinanceAdapter
 from collector.capture import CaptureRecord, payload_of
-from collector.source import BinanceFrameSource
+from collector.source import FrameSource
 
 
 class _FakeSocket:
@@ -82,13 +83,15 @@ def _run(
     )
     http = _FakeHttp(payloads)
     ctx = RunContext.create(source_name="test", http=cast(HttpClient, http))
-    source = BinanceFrameSource(
+    source = FrameSource(
+        venue=BinanceAdapter(
+            depth_interval_ms=100,
+            snapshot_limit=20,
+            ws_url="wss://example.invalid/ws",
+            rest_url="https://example.invalid/depth",
+        ),
         symbol="BTCUSDT",
         duration_s=duration_s,
-        ws_url="wss://example.invalid/ws",
-        rest_url="https://example.invalid/depth",
-        snapshot_limit=20,
-        depth_interval_ms=100,
     )
     return list(source.fetch(ctx)), http
 

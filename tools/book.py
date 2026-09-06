@@ -24,9 +24,8 @@ from typing import cast
 
 import pyarrow.dataset as ds
 
-from collector.adapters.binance import PRICE_SCALE
 from collector.book import Book
-from collector.model import Side
+from collector.model import SCALE, Side
 
 DEFAULT_DATASET = "data/l2/l2/levels"
 
@@ -77,7 +76,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if bid is None or ask is None:
         print("one side is empty; nothing to show")
         return 1
-    scale = 10**PRICE_SCALE
+    scale = 10**SCALE
     print(f"spread {(ask - bid) / scale:g}, mid {(ask + bid) / 2 / scale:g}\n")
 
     bids = sorted(book.bids, reverse=True)[: args.depth]
