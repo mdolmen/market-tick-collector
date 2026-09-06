@@ -212,3 +212,129 @@ chain rule exactly the way a genuine loss does. Venues redeliver. The prediction
 book stays *correct* (the re-bootstrap repairs something unbroken) while the collector pays a
 full snapshot for nothing, and that the fault injector is what surfaces it — which is the
 argument for having built it.
+
+### The measurement
+
+Apple M-series laptop, Python 3.11, BTCUSDT on `btcusdt@depth@100ms`. A 120s capture:
+1,200 frames, 4 snapshots at `snapshot_limit=1000`, 1,204 records, 1.1 MiB, zero socket skips
+and zero refetches. Reproduce with:
+
+```
+RAW_BUCKET_URL="file://$PWD/data/capture" MTC_MODE=capture \
+MTC_DURATION_S=120 MTC_SNAPSHOT_INTERVAL_S=30 MTC_SNAPSHOT_LIMIT=1000 \
+  uv run python -m collector.main
+RAW_BUCKET_URL="file://$PWD/data/capture" MTC_MODE=replay MTC_OUTPUT=console \
+  uv run python -m collector.main
+uv run python -m bench.replay data/capture/binance-depth
+```
+
+**Cold replay reproduces the session.** 1,200 frames → 18,055 rows, one bootstrap, zero
+gaps, zero crossed books, 1,065 bid / 1,109 ask levels, spread one tick. The replay runs with
+`http=None`, so any I/O at all would have raised: the capture alone is a sufficient
+description of the session, which is the claim the whole harness rests on.
+
+**The replay ceiling — decode → book apply → row built, excluding the socket *and* the sink:**
+
+| | |
+|---|---|
+| Frames/s | **37,425** |
+| Rows/s | **563,088** |
+| µs/frame | 26.7 |
+| Envelope decode, the replay's own overhead, reported apart | 2.2 µs/record |
+
+Through `ReplaySource` end to end — fsspec read, envelope decode and all — it is **17,948
+frames/s**. Both are real; the first says how fast the collector is, the second how fast the
+harness can drive it, and merging them would flatter one or the other.
+
+**Where the 26.7µs goes**, same corpus, each stage in isolation:
+
+| | µs/frame | frames/s |
+|---|---|---|
+| `parse_event` only (payload pre-decoded) | 10.45 | 95,674 |
+| `book.apply` only | **0.96** | 1,036,457 |
+| `level_rows` = `book.apply` + `LevelRow` construction | 5.69 | 175,612 |
+| Full transform through the generator | 26.76 | 37,369 |
+
+**Paced replay.** Same corpus, 120s span, at each speed:
+
+| speed | wall | expected | rows | gaps | book |
+|---|---|---|---|---|---|
+| 1× | 123.4s | 120.0s | 18,055 | 0 | 1065/1109 |
+| 10× | 14.1s | 12.0s | 18,055 | 0 | 1065/1109 |
+| 100× | 1.70s | 1.2s | 18,055 | 0 | 1065/1109 |
+| max | 0.07s | — | 18,055 | 0 | 1065/1109 |
+
+Identical rows and an identical book at every speed, which is the point: pacing changes when
+work happens and nothing about what it produces.
+
+**Fault injection**, seed 7, over the same capture:
+
+| faults | injected | jittered | gaps | bootstraps |
+|---|---|---|---|---|
+| `drop` | 29 | 0 | 4 | 4 |
+| `reorder` | 29 | 0 | 4 | 4 |
+| `duplicate` | 29 | 0 | 4 | 4 |
+| `clock_jitter` | 0 | 1,200 | **0** | 1 |
+| all four | 61 | 1,168 | 5 | 5 |
+
+### Grading the prediction
+
+**Wrong, by 3×.** Predicted 100k–140k frames/s; measured **37.4k**. The band came from
+`bench/decode.py`'s 8.5µs decode + model, and the transform turned out to cost three times
+that rather than a little more.
+
+**Right about the mechanism, wrong about which part.** The prediction said the book would not
+be the cost and the row model would be, and the book is indeed **0.96µs/frame — 3.6% of the
+path**, vindicating the Phase 0 call to keep the `dict`. But the biggest single line item was
+not predicted at all: **the per-row generator protocol costs ~10.7µs/frame, 40% of the
+path**. `transform()` → `_on_frame` → `_apply` → `yield from rows` is resumed once per row at
+13.4 rows per frame, and `LevelRow` construction adds 4.7µs on top. Phase 0 predicted
+`Record = dict[str, Any]` would dominate "somewhere around 10⁵ rows/s"; it dominates at
+5.6×10⁵, so that prediction was right in kind and conservative in threshold. This is the
+Arrow-batch `Sink` argument arriving with a number attached, a phase earlier than expected.
+
+**Right: three to four orders above the live rate.** 37,425 against the venue's 10.0
+frames/s is 3,742× — and the two are never reported as one number.
+
+**Right: the wake-up cost disappears.** `parse_event` + `level_rows` is 16.1µs here against
+`bench/cadence.py`'s 12.8µs p50 back-to-back and 235µs with 100ms idle between frames. The
+unthrottled replay sits with the former, nowhere near the latter, which retroactively
+confirms the Phase 0 finding that the live p99 was mostly wake-up cost.
+
+**Right: 100% of drops and reorders on a live book, 0% of clock jitter.** Jitter moved
+`receive_ts` on all 1,200 frames and produced **zero** gaps and a byte-identical book — the
+control worked, and nothing in the pipeline sequences by clock.
+
+**Right, and it is a defect: a duplicate frame is reported as a gap.** 29 duplicates, 4 gaps,
+a full re-bootstrap each time, and the book correct throughout. Pinned by
+`test_a_duplicate_frame_is_reported_as_a_gap` so that changing it is a decision. The fix is
+one branch — `event.final_id <= prev_final_id` → already applied, skip — but it belongs with
+the state machine in Phase 6, not bolted on here.
+
+### Not predicted at all, and the most useful thing here
+
+**With an out-of-band snapshot, one dropped frame costs up to a full snapshot interval of
+untrusted book.** Binance repairs a gap only by refetching over REST, and a *recording* cannot
+conjure a snapshot the live source never fetched — so recovery waits for the next periodic
+one. At 30s intervals that is up to 300 frames. Measured, same capture, varying the drop rate:
+
+| drop rate | injected | gaps | untrusted frames | live at exit | top-N vs clean |
+|---|---|---|---|---|---|
+| 0.02 | 29 | 4 | **84.1%** | no | — |
+| 0.005 | 13 | 4 | 64.2% | no | — |
+| 0.002 | 5 | 4 | 63.9% | no | — |
+| 0.001 | 2 | 2 | 37.5% | **yes** | top 10 / 50 / 250 all match |
+
+Three things follow, and none of them were on the plan:
+
+- **Convergence is only a claim about a run that ends trusted.** Above 0.001 the session ends
+  mid-interval, so its book says where it stopped rather than whether it recovers. Comparing
+  it to anything is the mistake `live_at_exit` now exists to prevent — and reporting a
+  "book mismatch" from such a run would have been a break that was pure artifact.
+- **Recovery latency is bounded by the snapshot interval, not by the pipeline.** That is a
+  venue property, not a code property, and it is the argument for Phase 3 sizing shards by
+  recovery time rather than by venue cap. It is also the concrete case for Kraken's row of
+  the dialect table: an in-band rolling checksum revalidates continuously and never waits.
+- **`snapshot_interval_s` is a real tuning knob, and it was not in the plan.** It exists
+  because an injected fault cannot conjure its own repair; it turns out to also set the
+  worst-case untrusted interval, and Phase 8's Oracle 1 reads the same records.
