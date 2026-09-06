@@ -311,6 +311,37 @@ a full re-bootstrap each time, and the book correct throughout. Pinned by
 one branch — `event.final_id <= prev_final_id` → already applied, skip — but it belongs with
 the state machine in Phase 6, not bolted on here.
 
+### What the number means, and what it is not
+
+37.4k frames/s is **not a wall**. It is one core, one process, pure Python, with two known
+optimisations not yet taken and a third that the profile above just made the case for.
+Measured headroom, same corpus:
+
+| | µs/frame | note |
+|---|---|---|
+| Today | 26.7 | |
+| `scaled_int` behind a bounded cache | **−3.9** | measured: 5.60 → 1.70µs/frame, and it is 49% of `parse_event`. 5,661 distinct strings in 32,272 — already on the Phase 9 list, and it needs a size bound before it is a speedup rather than a leak |
+| `msgspec` typed instead of stdlib `json` | ≈ −1.4 | Phase 0 measured 3.1 → 1.7µs on the payload decode |
+| Batch rows instead of yielding one at a time | ≈ −5 | most of the 10.7µs generator protocol; this is what the Arrow-batch `Sink` does anyway |
+| Arrow columnar builders instead of `LevelRow` dicts | ≈ −4 | the 4.7µs of per-row dict construction |
+
+Taking the first three lands near **16µs/frame ≈ 60k frames/s**; all four, near **12µs ≈ 80k**.
+None of that is speculative work — every line is already on the phase list for other reasons.
+
+**Against the target and against the plan**, which are two different comparisons:
+
+- `NOTES.md` § *The volume dial* sets **sustained 50k msg/s** through the full path. Today's
+  37.4k **misses it by 25%**, and the profile says exactly where the 25% is. That is the
+  honest state: a missed target with a reason beats a met target nobody can reproduce.
+- The *planned live load* is nowhere near either number. A few hundred symbols across three
+  venues on 100ms channels is ~9k frames/s aggregate — **4× under the current ceiling** — and
+  10⁷ rows/day is 116 rows/s against a measured 563k. The venue-side volume this project
+  plans for is not what the ceiling binds.
+
+So the ceiling is a claim about the code, and the code is currently ~4× faster than the
+workload and ~25% slower than the stated stress target. Both of those are worth saying; the
+one that would be dishonest is quoting 37.4k as a capture rate.
+
 ### Not predicted at all, and the most useful thing here
 
 **With an out-of-band snapshot, one dropped frame costs up to a full snapshot interval of
