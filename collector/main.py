@@ -126,9 +126,7 @@ def main() -> int:
     # The transform is held here rather than inside the builder because its
     # counters and the book it ends with are the run's actual result, and
     # ``WorkerApp.run()`` returns only an exit code.
-    transform = BookTransform(
-        symbol=settings.symbol, adapter=adapters.build(settings)
-    )
+    transform = BookTransform(symbol=settings.symbol, adapter=adapters.build(settings))
     build = build_collect_app if settings.mode == "collect" else build_replay_app
     code = build(settings, transform).run()
     get_logger().info("book", mode=settings.mode, **transform.summary())

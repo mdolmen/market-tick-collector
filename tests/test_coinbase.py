@@ -120,9 +120,7 @@ def test_a_lost_ack_is_detected_like_any_other_lost_message() -> None:
     records = coinbase_capture(
         count=_FRAMES, snapshot_every=_SNAPSHOT_EVERY, ack_before=25
     )
-    lone_ack = next(
-        r for r in records if r["kind"] == "control" and r["seq"] > 25
-    )
+    lone_ack = next(r for r in records if r["kind"] == "control" and r["seq"] > 25)
     without_it = [r for r in records if r["seq"] != lone_ack["seq"]]
 
     _, kept = _run(records)

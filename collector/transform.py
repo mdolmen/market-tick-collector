@@ -84,9 +84,7 @@ class BookTransform:
 
     # --- the Transform contract --------------------------------------------
 
-    def transform(
-        self, record: CaptureRecord, ctx: RunContext
-    ) -> Iterator[LevelRow]:
+    def transform(self, record: CaptureRecord, ctx: RunContext) -> Iterator[LevelRow]:
         """One capture record in, zero or more level rows out.
 
         Zero is the common case while buffering: nothing may be applied until

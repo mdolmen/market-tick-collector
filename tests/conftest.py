@@ -113,9 +113,7 @@ def synthetic_snapshot(before_index: int) -> dict[str, Any]:
     }
 
 
-def synthetic_capture(
-    *, count: int, snapshot_every: int = 0
-) -> list[CaptureRecord]:
+def synthetic_capture(*, count: int, snapshot_every: int = 0) -> list[CaptureRecord]:
     """``count`` chained frames, with a snapshot at 0 and every ``n`` after."""
     positions = {0}
     if snapshot_every > 0:
@@ -199,9 +197,7 @@ def _cb_book(
         "channel": "l2_data",
         "timestamp": _cb_time(sequence),
         "sequence_num": sequence,
-        "events": [
-            {"type": event_type, "product_id": _CB_SYMBOL, "updates": updates}
-        ],
+        "events": [{"type": event_type, "product_id": _CB_SYMBOL, "updates": updates}],
     }
 
 
