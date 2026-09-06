@@ -26,12 +26,12 @@ is a legal `Source` and `WorkerApp` ran it untouched, so Phase 0 needed **zero**
 
 ## Phase 1 · Capture & replay harness
 
-- [ ] Capture raw frames verbatim to disk via the SDK's raw-landing pattern
-- [ ] Replay from disk at 1× / 10× / 100×, excluding the socket path
-- [ ] Fault injection: dropped frames, reordering, duplicates, gaps, bursts, clock jitter
-- [ ] Deterministic seeding so any replay run is byte-reproducible
-- [ ] Regression test: replay a known session, assert the resulting book matches
-- [ ] Report the replay ceiling separately from any live capture rate, always labelled
+- [x] Capture raw frames verbatim to disk via the SDK's raw-landing pattern
+- [x] Replay from disk at 1× / 10× / 100×, excluding the socket path
+- [x] Fault injection: dropped frames, reordering, duplicates, gaps, bursts, clock jitter
+- [x] Deterministic seeding so any replay run is byte-reproducible
+- [x] Regression test: replay a known session, assert the resulting book matches
+- [x] Report the replay ceiling separately from any live capture rate, always labelled
 
 ## Phase 2 · Venue adapters
 
@@ -116,8 +116,10 @@ is a legal `Source` and `WorkerApp` ran it untouched, so Phase 0 needed **zero**
 
 ## Phase 8 · Reconciliation
 
-- [ ] Oracle 1: reconstructed book vs venue REST snapshot, periodic
-- [ ] Oracle 2: venue's own depth-limited top-N, continuous, on audited symbols
+- [ ] Oracle 1: reconstructed book vs venue REST snapshot, periodic — the snapshots are
+      already in the capture as of Phase 1; what is missing is the comparison
+- [ ] Oracle 2: venue's own depth-limited top-N, continuous, on audited symbols — the capture
+      envelope already tags `stream`, so this is a subscription, not a format migration
 - [ ] Align oracle 2 by update id, never by clock; keep a ring of recent top-N versions
 - [ ] Compare the top N−1 levels to avoid the truncation boundary artifact
 - [ ] Oracle 3: replay harness injected faults; target detection of 100%
