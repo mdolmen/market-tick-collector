@@ -88,12 +88,16 @@ class BinanceBookTransform:
     def _on_snapshot(
         self, record: CaptureRecord, ctx: RunContext
     ) -> Iterator[LevelRow]:
-        """A snapshot record always (re)starts a bootstrap.
+        """A snapshot repairs an untrusted book, and is ignored by a trusted one.
 
-        Uniform rather than conditional on the current state: a fresh snapshot
-        is authoritative, so splicing against it is correct whether it arrived
-        because the run just started, because the last one was too old, or
-        because the socket skipped. The buffer is deliberately *not* cleared —
+        The source lands snapshots periodically as well as on demand, so most
+        of them arrive at a book that is perfectly healthy. Rebuilding from
+        those would cost a full snapshot's worth of rows — 10⁴ at the real
+        depth limit — to arrive exactly where the book already is, and would
+        reset the untrusted-interval bookkeeping that convergence is measured
+        with. They are Oracle 1's data and a repair held in reserve.
+
+        When the book *is* untrusted the buffer is deliberately not cleared:
         ``splice`` discards whatever is entirely in the past by itself, and a
         frame straddling the new snapshot is exactly what it is looking for.
         """
@@ -102,7 +106,8 @@ class BinanceBookTransform:
             receive_ts=record["receive_ts"],
             monotonic_ts=record["monotonic_ts"],
         )
-        self._live = False
+        if self._live:
+            return
         yield from self._try_splice(ctx)
 
     def _on_frame(self, record: CaptureRecord, ctx: RunContext) -> Iterator[LevelRow]:
