@@ -509,6 +509,21 @@ wall clock, and an NTP step lands in this distribution as a spike no venue cause
 Binance's 113.8 ms median is partly the channel: `E` is the event time and the diff channel
 aggregates on a 100 ms cadence, so roughly half a window is built in before any network.
 
+### What the boundary cost per frame: nothing measurable
+
+Putting the venue behind a protocol adds an attribute lookup and a bound-method call to every
+parse. `bench/cadence.py`, same corpus and same machine as Phase 0:
+
+| | p50 | p90 | p99 |
+|---|---|---|---|
+| Phase 0, venue fused into the transform | 12.8 µs | 31.5 µs | 192.3 µs |
+| Phase 2, venue behind `VenueAdapter` | 12.2 µs | 29.9 µs | 183.7 µs |
+
+Slightly *faster*, which is noise rather than an improvement — the honest reading is that the
+indirection is invisible next to the JSON decode and the per-level scaling that dominate this
+path. Worth measuring anyway: "an abstraction is free" is the kind of claim this project is
+supposed to check rather than assert.
+
 ### Symbols: 188 base assets, and one that nearly went missing
 
 188 base assets are quoted against a USD-ish asset on all three venues (Binance USDT,
