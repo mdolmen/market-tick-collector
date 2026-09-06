@@ -69,12 +69,14 @@ class BinanceFrameSource:
         rest_url: str,
         snapshot_limit: int,
         depth_interval_ms: int,
+        snapshot_interval_s: float = 0.0,
     ) -> None:
         self.symbol = symbol.upper()
         self._duration_s = duration_s
         self._ws_url = ws_url.rstrip("/")
         self._rest_url = rest_url
         self._snapshot_limit = snapshot_limit
+        self._snapshot_interval_s = snapshot_interval_s
         self._stream = binance.stream_name(self.symbol, depth_interval_ms)
 
         self._seq = 0
@@ -88,6 +90,7 @@ class BinanceFrameSource:
         self._last_update_id: int | None = None
         self._skipped = False
         self._refetches = 0
+        self._last_snapshot_at = 0.0
 
     def fetch(self, ctx: RunContext) -> Iterator[CaptureRecord]:
         with connect(
@@ -183,10 +186,26 @@ class BinanceFrameSource:
         # The snapshot caught up, so the refetch budget is for the next stall
         # rather than for the whole run.
         self._refetches = 0
-        if not self._skipped:
+        if self._skipped:
+            ctx.logger.warning("socket skipped, fetching a snapshot")
+            return True
+        return self._interval_elapsed()
+
+    def _interval_elapsed(self) -> bool:
+        """Periodic snapshots, for two reasons that are not about this phase.
+
+        A fault injected into a *recording* removes frames; it cannot conjure
+        the repair snapshot a live source would have fetched. So without
+        periodic snapshots a fault-injected replay can detect a gap and never
+        converge, and convergence is half of what the harness exists to prove.
+
+        The second reason is Phase 8's Oracle 1 — reconstructed book against
+        the venue's periodic REST snapshot — which needs exactly this in the
+        capture and would otherwise force a second pass over the venue.
+        """
+        if self._snapshot_interval_s <= 0:
             return False
-        ctx.logger.warning("socket skipped, fetching a snapshot")
-        return True
+        return time.monotonic() - self._last_snapshot_at >= self._snapshot_interval_s
 
     # --- fetching ----------------------------------------------------------
 
@@ -206,6 +225,7 @@ class BinanceFrameSource:
         self._snapshots += 1
         self._last_update_id = int(payload["lastUpdateId"])
         self._first_id_since_snapshot = None
+        self._last_snapshot_at = time.monotonic()
         return self._record(
             stream=binance.REST_DEPTH_STREAM,
             kind="snapshot",

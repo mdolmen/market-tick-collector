@@ -59,6 +59,7 @@ def _frame_source(settings: CollectorSettings) -> BinanceFrameSource:
         rest_url=settings.rest_url,
         snapshot_limit=settings.snapshot_limit,
         depth_interval_ms=settings.depth_interval_ms,
+        snapshot_interval_s=settings.snapshot_interval_s,
     )
 
 

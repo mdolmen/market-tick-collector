@@ -28,6 +28,12 @@ class CollectorSettings(Settings):
     depth_interval_ms: int = 100
     snapshot_limit: int = 5000
 
+    # How often to land a snapshot even when the sequence is healthy. It makes
+    # a capture recoverable from an *injected* fault (which removes frames but
+    # cannot conjure the repair snapshot a live source would have fetched), and
+    # it is what Phase 8's periodic REST oracle reads. Zero disables it.
+    snapshot_interval_s: float = 300.0
+
     ws_url: str = "wss://stream.binance.com:9443/ws"
     rest_url: str = "https://api.binance.com/api/v3/depth"
 
