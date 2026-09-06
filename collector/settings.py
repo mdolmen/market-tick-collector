@@ -39,8 +39,25 @@ class CollectorSettings(Settings):
     # a live run before wiring storage.
     output: Literal["parquet", "console"] = "parquet"
 
-    # Dump every received frame verbatim to this path as JSONL. Feeds
-    # bench/decode.py and seeds Phase 1's replay input. Off by default: the tap
-    # sits inside the measured in-process path, so a baseline run leaves it
-    # unset and the corpus is captured by a separate run.
-    raw_frames_path: str | None = None
+    # Which of the three wirings of the same two pieces to run:
+    #   collect  socket -> book -> level rows -> curated sink (the Phase 0 path)
+    #   capture  socket -> raw landing, verbatim, no book at all
+    #   replay   raw landing -> book -> level rows, no socket
+    mode: Literal["collect", "capture", "replay"] = "collect"
+
+    # Where a capture lands and a replay reads from. The bucket falls back to
+    # the SDK's own RAW_BUCKET_URL when unset, which is how a local
+    # file:// dir and a gs:// bucket stay the same code.
+    raw_channel: str = "binance-depth"
+    raw_bucket_url: str | None = None
+
+    # Paced replay: the capture's own inter-arrival gaps divided by this. None
+    # means unthrottled — the replay *ceiling*, which is a different number and
+    # is never reported as a capture rate.
+    replay_speed: float | None = None
+
+    # Comma-separated fault names (see collector.replay.FAULT_NAMES) and the
+    # seed that makes any run of them reproducible. The seed is reported, so a
+    # break can always be re-created exactly.
+    faults: str = ""
+    fault_seed: int = 0

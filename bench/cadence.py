@@ -26,35 +26,23 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from collector.adapters import binance
-from collector.source import BinanceDepthSource
+from collector.transform import BinanceBookTransform
 
 # Enough frames to characterise a percentile without spending len(corpus) *
 # gap seconds on the idle pass.
 IDLE_SAMPLE = 150
 
 
-def _source() -> BinanceDepthSource:
-    """A source with no socket: only its per-frame path is exercised here."""
-    return BinanceDepthSource(
-        symbol="BTCUSDT",
-        duration_s=0,
-        ws_url="",
-        rest_url="",
-        snapshot_limit=0,
-        depth_interval_ms=100,
-    )
-
-
 def _measure(frames: Sequence[str], gap_s: float) -> list[int]:
-    source = _source()
+    transform = BinanceBookTransform(symbol="BTCUSDT")
     latencies: list[int] = []
     for text in frames:
         if gap_s:
             time.sleep(gap_s)
         started = time.monotonic_ns()
         event = binance.parse_event(json.loads(text), receive_ts=0, monotonic_ts=0)
-        # The source's own row construction, deliberately not a copy of it.
-        source._level_rows(event)
+        # The collector's own row construction, deliberately not a copy of it.
+        transform.level_rows(event)
         latencies.append(time.monotonic_ns() - started)
     return latencies
 
