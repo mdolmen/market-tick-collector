@@ -165,3 +165,50 @@ throughput story gets written.
   slow sink right now, so a stalled consumer still reaches back to the socket — the coupling
   Phase 5 exists to break. At one symbol it never bit; the console-sink smoke run made it
   visible immediately, with `receive_ts` values bunching as frames were drained in bursts.
+
+---
+
+## Phase 1 — capture & replay harness
+
+The collector split along the SDK's ingest/transform boundary: `BinanceFrameSource` lands
+verbatim capture records, `BinanceBookTransform` turns them into level rows, and a replay
+feeds the *same transform* from disk. Faults are injected into the record stream, never into
+the book.
+
+### The prediction
+
+Written **before** the measured runs. Nothing had been measured at this point beyond Phase 0.
+
+**The replay ceiling lands between 100k and 140k frames/s.** `bench/decode.py` measured decode
++ model at 8.5µs per frame on stdlib `json` after the `scaled_int` work, which is ~118k
+frames/s, and the transform adds a dict write per level plus a `LevelRow` construction per
+level on top of that. Those are not free — Phase 0's own prediction list says
+`Record = dict[str, Any]` becomes the dominant per-row cost around 10⁵ rows/s, and at ~15
+levels per frame this corpus crosses that. So: **frames/s within the decode+model band but
+rows/s the number that actually binds**, and the gap between the two is the row model, not
+the book.
+
+If that is wrong, the interesting version of wrong is the `dict` book being the cost rather
+than the row model — which would move Phase 6's benchmark forward, because it would mean the
+write path matters at a volume Phase 0 predicted it would not.
+
+**Three to four orders of magnitude above the live rate.** Phase 0 measured 10.0 frames/s
+live, bounded entirely by the venue's 100ms channel. `DEVELOPMENT.md` above predicted the
+ceiling three or four orders above that; at 10⁵ frames/s it is four. The two numbers are
+never merged, and the ceiling excludes the sink as well as the socket at this phase.
+
+**Wake-up cost disappears.** `bench/cadence.py` measured an 18× gap between back-to-back and
+100ms-idle frames — p50 12.8µs against 235.0µs. An unthrottled replay never idles, so the
+ceiling should sit near the back-to-back figure and *not* near the live one. If it does, that
+retroactively confirms the Phase 0 finding that the live p99 was mostly wake-up cost.
+
+**Fault detection: 100% of drops and reorders landing on a live book, 0% of clock jitter.**
+Jitter is the control: nothing in the pipeline may sequence by clock, so a book that changes
+under it has a bug that no other test would find.
+
+**A duplicate frame will be reported as a gap, and that is a defect.** `in_sequence` is
+`U == prev_u + 1`, so a redelivered frame — whose `U` is at or behind the cursor — fails the
+chain rule exactly the way a genuine loss does. Venues redeliver. The prediction is that the
+book stays *correct* (the re-bootstrap repairs something unbroken) while the collector pays a
+full snapshot for nothing, and that the fault injector is what surfaces it — which is the
+argument for having built it.
