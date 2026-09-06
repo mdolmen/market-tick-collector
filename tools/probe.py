@@ -189,11 +189,14 @@ def _nested_tags(items: Sequence[Any]) -> set[str]:
 
 
 def max_decimals(value: Any, best: tuple[int, str] = (0, "")) -> tuple[int, str]:
-    """Deepest fraction seen in any plain decimal string, and the string itself.
+    """Deepest fraction seen in any plain decimal token, and the token itself.
 
     Settles the one project-wide `SCALE`: `scaled_int` refuses to truncate, so
     a venue quoting finer than the chosen scale fails every run rather than
     corrupting a book key. Better to learn that here than in production.
+
+    Reads tokens, not values, because `report` decodes with `parse_float=str`
+    — see there for why that is not a detail.
     """
     if isinstance(value, str):
         whole, dot, fraction = value.partition(".")
@@ -215,7 +218,12 @@ def report(records: Sequence[Mapping[str, object]], *, venue: str) -> None:
     deepest = (0, "")
     for record in records:
         text = str(record["payload"])
-        payload = json.loads(text)
+        # `parse_float=str` keeps every number as its exact source token. Not a
+        # reporting nicety: Kraken quotes price and qty as JSON *numbers*, so a
+        # plain `json.loads` rounds a book key through a float before anything
+        # can object, and the decimal depth this function measures would read
+        # as zero because no price was ever a string.
+        payload = json.loads(text, parse_float=str)
         key = shape(payload)
         count, example = shapes.get(key, (0, text))
         shapes[key] = (count + 1, example)
