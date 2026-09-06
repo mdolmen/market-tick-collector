@@ -15,7 +15,7 @@ from typing import Any, cast
 import pytest
 
 from collector.adapters import binance
-from collector.capture import CaptureRecord
+from collector.capture import CaptureRecord, Kind
 
 _FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -124,3 +124,128 @@ def synthetic_capture(
         snapshots={index: synthetic_snapshot(index) for index in sorted(positions)},
         frames=[json.dumps(synthetic_frame(i)) for i in range(count)],
     )
+
+
+# --- Coinbase --------------------------------------------------------------
+#
+# The other dialect, and the one the boundary is actually tested by. Two things
+# the Binance builders above have no reason to model and this one must:
+# ``sequence_num`` runs across *every* message on the connection, control
+# records included, and the snapshot occupies a number of its own rather than
+# arriving out of band. A builder that numbered only the frames would produce a
+# capture no live session could ever emit, and the tests over it would prove
+# nothing about the adapter.
+
+_CB_SYMBOL = "BTC-USD"
+_CB_STREAM = f"level2:{_CB_SYMBOL}"
+_CB_BID_TICKS = 79_850_00000000
+_CB_TICK = 1_00000000
+
+
+def _cb_time(sequence: int) -> str:
+    """A distinct RFC3339 stamp per message, with a nanosecond fraction."""
+    minutes, seconds = divmod(sequence, 60)
+    return f"2026-09-06T10:{minutes:02d}:{seconds:02d}.123456789Z"
+
+
+def _cb_level(side: str, ticks: int, quantity: str, sequence: int) -> dict[str, Any]:
+    return {
+        "side": side,
+        "event_time": _cb_time(sequence),
+        "price_level": f"{ticks / 10**8:.8f}",
+        "new_quantity": quantity,
+    }
+
+
+def coinbase_frame(sequence: int, index: int) -> dict[str, Any]:
+    """One ``update`` message: one level a side, at its own sequence number."""
+    price = _CB_BID_TICKS + (index % 5) * _CB_TICK
+    return _cb_book(
+        sequence,
+        "update",
+        [
+            _cb_level("bid", price, f"{1 + index % 3}.00000000", sequence),
+            _cb_level("offer", price + _CB_TICK * 10, "2.00000000", sequence),
+        ],
+    )
+
+
+def coinbase_snapshot(sequence: int) -> dict[str, Any]:
+    """A ``snapshot`` message. In band, so it consumes a sequence number."""
+    return _cb_book(
+        sequence,
+        "snapshot",
+        [
+            _cb_level("bid", _CB_BID_TICKS, "1.00000000", sequence),
+            _cb_level("offer", _CB_BID_TICKS + _CB_TICK * 10, "2.00000000", sequence),
+        ],
+    )
+
+
+def coinbase_control(sequence: int) -> dict[str, Any]:
+    """A subscriptions ack — no book state, and numbered like everything else."""
+    return {
+        "channel": "subscriptions",
+        "timestamp": _cb_time(sequence),
+        "sequence_num": sequence,
+        "events": [{"subscriptions": {"level2": [_CB_SYMBOL]}}],
+    }
+
+
+def _cb_book(
+    sequence: int, event_type: str, updates: list[dict[str, Any]]
+) -> dict[str, Any]:
+    return {
+        "channel": "l2_data",
+        "timestamp": _cb_time(sequence),
+        "sequence_num": sequence,
+        "events": [
+            {"type": event_type, "product_id": _CB_SYMBOL, "updates": updates}
+        ],
+    }
+
+
+def coinbase_capture(
+    *, count: int, snapshot_every: int = 0, ack_before: int | None = None
+) -> list[CaptureRecord]:
+    """``count`` frames, with an ack-then-snapshot pair at 0 and every ``n``.
+
+    The ack before each snapshot is what a resubscribe actually looks like on
+    the wire, and it is there so the tests exercise a control record sitting
+    inside the sequence rather than a tidier stream than the venue sends.
+
+    ``ack_before`` places one *standalone* ack in front of that frame, away
+    from any snapshot. Losing an ack next to a snapshot is undetectable and
+    should be — the snapshot re-establishes the cursor either way — so it takes
+    a lone one to show that the sequence covers control traffic at all.
+    """
+    positions = {0}
+    if snapshot_every > 0:
+        positions |= set(range(snapshot_every, count, snapshot_every))
+
+    records: list[CaptureRecord] = []
+    sequence = 0
+
+    def append(kind: Kind, payload: dict[str, Any]) -> None:
+        nonlocal sequence
+        seq = len(records) + 1
+        records.append(
+            CaptureRecord(
+                stream=_CB_STREAM,
+                kind=kind,
+                seq=seq,
+                receive_ts=1_700_000_000_000_000_000 + seq * _STEP_NS,
+                monotonic_ts=seq * _STEP_NS,
+                payload=json.dumps(payload),
+            )
+        )
+        sequence += 1
+
+    for index in range(count):
+        if index in positions:
+            append("control", coinbase_control(sequence))
+            append("snapshot", coinbase_snapshot(sequence))
+        if index == ack_before:
+            append("control", coinbase_control(sequence))
+        append("frame", coinbase_frame(sequence, index))
+    return records
