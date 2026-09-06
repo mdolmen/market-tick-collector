@@ -80,6 +80,7 @@ def test_a_clean_session_bootstraps_once_and_never_gaps() -> None:
 
     assert clean.gaps == 0
     assert clean.bootstraps == 1
+    assert clean.live
     assert _gap_rows(rows) == []
     # One snapshot's rows, not one per periodic snapshot.
     assert sum(row["action"] == "snapshot" for row in rows) == 2
@@ -107,7 +108,11 @@ def test_a_dropped_run_is_detected_and_the_book_reconverges() -> None:
     # Repaired: the next periodic snapshot closed it, so the interval has both
     # edges in the data and convergence is measurable.
     assert faulted.bootstraps == clean.bootstraps + 1
-    # Converged: the book ends where the clean replay ends.
+    # Converged: the interval closed, and the book ends where the clean replay
+    # ends. Both halves are needed — a run that ends untrusted has a book that
+    # says where it stopped, not whether it recovers.
+    assert faulted.live
+    assert faulted.untrusted_frames > clean.untrusted_frames
     assert _book(faulted) == _book(clean)
     assert rows != clean_rows
 

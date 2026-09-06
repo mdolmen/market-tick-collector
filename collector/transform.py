@@ -66,6 +66,11 @@ class BinanceBookTransform:
         self.gaps = 0
         self.bootstraps = 0
         self.crossed = 0
+        # Frames that arrived while the book was untrusted — buffered, not
+        # applied. The untrusted *interval* is what convergence is measured
+        # over (``NOTES.md`` § *The state machine is the artifact*), and a
+        # count of gaps says nothing about how long they lasted.
+        self.untrusted_frames = 0
 
     # --- the Transform contract --------------------------------------------
 
@@ -119,6 +124,7 @@ class BinanceBookTransform:
         self.frames += 1
 
         if not self._live:
+            self.untrusted_frames += 1
             self._buffered.append(event)
             yield from self._try_splice(ctx)
             return
@@ -269,6 +275,16 @@ class BinanceBookTransform:
         """The reconstructed book, for a caller that wants to assert on it."""
         return self._book
 
+    @property
+    def live(self) -> bool:
+        """Whether the book is trusted right now.
+
+        A run that ends untrusted has not converged, whatever its gap count
+        says — the last interval simply never closed. Comparing such a book
+        against anything measures where it stopped, not whether it recovers.
+        """
+        return self._live
+
     def summary(self) -> dict[str, object]:
         """Counters and the book at exit. Throughput belongs to the driver."""
         bid, ask = self._book.best_bid_ask()
@@ -278,6 +294,8 @@ class BinanceBookTransform:
             "rows": self.rows,
             "bootstraps": self.bootstraps,
             "gaps": self.gaps,
+            "untrusted_frames": self.untrusted_frames,
+            "live_at_exit": self._live,
             "crossed_books": self.crossed,
             "bid_levels": len(self._book.bids),
             "ask_levels": len(self._book.asks),
