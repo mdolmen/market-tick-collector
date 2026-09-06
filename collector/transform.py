@@ -76,6 +76,11 @@ class BookTransform:
         # over (``NOTES.md`` § *The state machine is the artifact*), and a
         # count of gaps says nothing about how long they lasted.
         self.untrusted_frames = 0
+        # One `receive_ts - exchange_ts` per frame that carried a venue clock.
+        # A plain list because every run in this phase is bounded; a
+        # long-running collector needs a histogram at the metric surface
+        # instead, which is Phase 4's deliberate §8 change. See `summary`.
+        self._skews: list[int] = []
 
     # --- the Transform contract --------------------------------------------
 
@@ -137,6 +142,8 @@ class BookTransform:
             monotonic_ts=record["monotonic_ts"],
         )
         self.frames += 1
+        if event.exchange_ts is not None:
+            self._skews.append(event.receive_ts - event.exchange_ts)
 
         if not self._live:
             self.untrusted_frames += 1
@@ -300,10 +307,40 @@ class BookTransform:
         """
         return self._live
 
+    def skew_ms(self) -> dict[str, float]:
+        """Venue clock to our clock, in milliseconds, per percentile.
+
+        **This is not clock offset.** It is `receive_ts - exchange_ts`, which
+        is one-way network delay *plus* the offset between the venue's clock
+        and ours, and the two are not separable without a round-trip estimate
+        this collector never makes. Reporting it as "clock skew" and leaving it
+        there would be a number that looks more precise than it is; it is a
+        useful upper bound on delay and a useful drift alarm, and nothing more.
+
+        It also inherits our own clock discipline: `receive_ts` is a wall clock
+        and an NTP step lands in this distribution as a spike no venue caused.
+
+        In a replay the values are the *capture's* skew, not the replay's,
+        because both clocks are read from the record. That is the intended
+        behaviour — it makes the number a property of the session rather than
+        of when it happened to be reprocessed.
+        """
+        if not self._skews:
+            return {}
+        ordered = sorted(self._skews)
+
+        def at(quantile: float) -> float:
+            index = min(len(ordered) - 1, int(quantile * len(ordered)))
+            return round(ordered[index] / 1e6, 3)
+
+        return {"p50": at(0.5), "p90": at(0.9), "p99": at(0.99)}
+
     def summary(self) -> dict[str, object]:
         """Counters and the book at exit. Throughput belongs to the driver."""
         bid, ask = self._book.best_bid_ask()
         return {
+            "venue": self._adapter.venue,
+            "skew_ms": self.skew_ms(),
             "symbol": self.symbol,
             "frames": self.frames,
             "rows": self.rows,
