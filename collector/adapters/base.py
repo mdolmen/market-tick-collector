@@ -119,17 +119,16 @@ class VenueAdapter(Protocol):
 
     venue: str
 
-    def classify(self, stream: str, payload: Mapping[str, Any]) -> Kind | None:
-        """Frame, snapshot, or neither.
+    def classify(self, stream: str, payload: Mapping[str, Any]) -> Kind:
+        """Frame, snapshot, or control.
 
-        `None` is control traffic — subscription acks, heartbeats, status —
-        which is dropped rather than landed. Binance never produces any;
-        Coinbase and Kraken both do, which is why it is in the contract.
+        `control` is a subscription ack, heartbeat or status message: no book
+        state, no rows. It is still landed, because a venue may count it in the
+        same sequence it counts book messages — Coinbase does — and a capture
+        missing it replays as a gap that never happened.
 
         This runs at capture time, because `FaultInjector` reads `kind` off
-        disk to guarantee it never drops a snapshot, so the landed value has
-        to be right. The transform re-derives it and asserts agreement, so a
-        replay does not inherit a capture-time mistake in silence.
+        disk to know what it may perturb, so the landed value has to be right.
         """
         ...
 
@@ -167,8 +166,15 @@ class VenueAdapter(Protocol):
         """The snapshot predates the buffer, so updates between them are lost.
 
         Shared by `bootstrap`, which classifies it, and the capture source,
-        which refetches on it. Always false for a venue whose snapshot arrives
-        in band, since there is no window for one to open in.
+        which repairs on it.
+
+        It is tempting to think an in-band snapshot can never be stale, since
+        there is no fetch window for updates to be lost in. That is wrong, and
+        wrong in a way that corrupts a book rather than failing loudly: the
+        transform keeps the *last* snapshot it saw, and when a gap opens much
+        later that snapshot is far behind the buffer. Rebuilding from it
+        silently discards every update in between. The test that catches it is
+        a crossed book.
         """
         ...
 
@@ -190,10 +196,10 @@ class VenueAdapter(Protocol):
         """Locate the snapshot inside the buffered stream.
 
         Three outcomes rather than a bool because the two failures are not the
-        same failure: an old snapshot needs a refetch, a young one needs
+        same failure: an old snapshot needs a fresh one, a young one needs
         patience, and collapsing them gives a bootstrap loop that occasionally
-        spins. A venue whose snapshot arrives in band on the same socket can
-        only ever return READY, and says so by returning it.
+        spins. Both venues so far delegate to `bootstrap_by_sequence`; it stays
+        a protocol member because a checksum venue would not.
         """
         ...
 
@@ -215,12 +221,37 @@ class VenueAdapter(Protocol):
         """
         ...
 
-    def bootstrapped(self) -> None:
-        """A snapshot has been spliced in; reset the sequence cursor."""
+    def bootstrapped(self, snapshot: Snapshot) -> None:
+        """A snapshot has been applied; set the sequence cursor from it.
+
+        Takes the snapshot because the two dialects want opposite things from
+        it. Binance must forget the cursor entirely — its straddling frame
+        legitimately begins *before* the snapshot position, so the chain rule
+        would reject the one frame the bootstrap just proved correct. Coinbase
+        must set the cursor *to* the snapshot's own sequence, because the next
+        message has to be exactly one past it and dropping that check would
+        waive the only proof the repair worked.
+        """
         ...
 
     def accept(self, update: Update) -> None:
         """Advance the cursor past an update that has been applied."""
+        ...
+
+    def advance(self, payload: Mapping[str, Any]) -> None:
+        """Advance the cursor past a message that yields no `Update`.
+
+        Control traffic and in-band snapshots both land here, because both can
+        occupy a sequence number without describing a book mutation this
+        adapter will ever be handed as an `Update`. Where a venue numbers them
+        and this is not called, the *next* frame fails the chain rule, asks for
+        a repair, and the repair's own snapshot fails it again — a loop that
+        costs a full snapshot every time round.
+
+        A no-op wherever the venue's snapshot arrives out of band or its
+        control traffic sits outside the sequence, which is Binance on both
+        counts.
+        """
         ...
 
 
@@ -246,6 +277,19 @@ class VenueTransport(Protocol):
         """The `stream` a socket message's capture record carries."""
         ...
 
+    def resubscribe_frames(self, symbol: str) -> tuple[str, ...]:
+        """Frames that make an in-band venue send a fresh snapshot.
+
+        The in-band counterpart of an out-of-band REST refetch, and the source
+        makes the same decision for both — only the action differs. Coinbase
+        never re-sends a snapshot spontaneously, so a book that has gone
+        untrusted can only be repaired by asking for one; unsubscribe followed
+        by subscribe does it, and the connection's sequence continues unbroken
+        across the pair (measured, Phase 2). Empty for a venue with an
+        out-of-band snapshot, which refetches instead.
+        """
+        ...
+
     def snapshot_request(self, symbol: str) -> SnapshotRequest | None:
         """The out-of-band fetch, or `None` when the venue sends its own.
 
@@ -262,3 +306,29 @@ class Venue(VenueAdapter, VenueTransport, Protocol):
     `VenueAdapter`, deliberately the narrower of the two, so that no amount of
     later drift can put a socket or an HTTP call on the replay path.
     """
+
+
+def bootstrap_by_sequence(
+    adapter: VenueAdapter, buffered: Sequence[Update], snapshot: Snapshot
+) -> BootstrapResult:
+    """The bootstrap for any venue whose messages carry monotone ids.
+
+    Shared because both dialects reduce to it, for reasons that only look
+    different. Binance's frames cover a *range*, so the snapshot position falls
+    inside one and the straddler is the first frame whose range ends past it.
+    Coinbase numbers messages one at a time, so the range is a point and the
+    same walk lands on the first message after the snapshot. Writing it twice
+    would be two copies of one rule.
+
+    What stays per-venue is `snapshot_stale`, and the three outcomes exist
+    because its two failures are not the same failure: a snapshot the buffer
+    has already overrun needs a fresh one, a snapshot the buffer has not
+    reached yet needs patience. Collapsing them into "retry" spins.
+    """
+    for index, update in enumerate(buffered):
+        if update.final_seq <= snapshot.final_seq:
+            continue  # entirely in the past — discard
+        if adapter.snapshot_stale(update.first_seq, snapshot.final_seq):
+            return BootstrapResult(BootstrapOutcome.SNAPSHOT_TOO_OLD)
+        return BootstrapResult(BootstrapOutcome.READY, index)
+    return BootstrapResult(BootstrapOutcome.BUFFER_BEHIND)

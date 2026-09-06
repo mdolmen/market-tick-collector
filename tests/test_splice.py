@@ -20,6 +20,17 @@ from collector.adapters.binance import BinanceAdapter
 
 _FIXTURES = Path(__file__).parent / "fixtures"
 
+# Binance forgets the cursor on bootstrap, so which snapshot it is handed makes
+# no difference — but the contract takes one, because Coinbase's does.
+_SNAPSHOT = Snapshot(
+    final_seq=0,
+    exchange_ts=None,
+    receive_ts=0,
+    monotonic_ts=0,
+    bids=(),
+    asks=(),
+)
+
 
 def splice(buffered: list[Update], last_update_id: int) -> BootstrapResult:
     """`bootstrap` against a bare sequence id.
@@ -140,7 +151,7 @@ def test_buffer_behind_on_an_empty_buffer() -> None:
 
 def test_consecutive_frames_are_in_sequence(frames: list[Update]) -> None:
     adapter = BinanceAdapter()
-    adapter.bootstrapped()
+    adapter.bootstrapped(_SNAPSHOT)
 
     for event in frames:
         assert not adapter.gap_detected(event)
@@ -153,7 +164,7 @@ def test_a_skipped_frame_is_a_gap_and_latches_snapshot_required(
     frames: list[Update],
 ) -> None:
     adapter = BinanceAdapter()
-    adapter.bootstrapped()
+    adapter.bootstrapped(_SNAPSHOT)
     adapter.accept(frames[0])
 
     assert adapter.gap_detected(frames[2])
@@ -164,7 +175,7 @@ def test_snapshot_required_stays_latched_past_the_frame_that_broke_the_chain(
     frames: list[Update],
 ) -> None:
     adapter = BinanceAdapter()
-    adapter.bootstrapped()
+    adapter.bootstrapped(_SNAPSHOT)
     adapter.accept(frames[0])
     adapter.gap_detected(frames[2])
     adapter.accept(frames[2])
@@ -185,7 +196,7 @@ def test_the_straddler_is_not_judged_by_the_chain_rule(
     # The splice validated it, and its U legitimately starts before S + 1, so
     # the chain rule would reject the one event already proven correct.
     adapter = BinanceAdapter()
-    adapter.bootstrapped()
+    adapter.bootstrapped(_SNAPSHOT)
 
     assert not adapter.gap_detected(frames[5])
     assert not adapter.snapshot_required()

@@ -85,10 +85,14 @@ class BookTransform:
         """One capture record in, zero or more level rows out.
 
         Zero is the common case while buffering: nothing may be applied until
-        the bootstrap has located the snapshot inside the stream, and then a whole
-        bootstrap's worth of rows leaves at once.
+        the bootstrap has located the snapshot inside the stream, and then a
+        whole bootstrap's worth of rows leaves at once. A control record always
+        yields zero — it carries no book state — but it is not free, because a
+        venue may number it in the same sequence as its book messages.
         """
-        if record["kind"] == "snapshot":
+        if record["kind"] == "control":
+            self._adapter.advance(payload_of(record))
+        elif record["kind"] == "snapshot":
             yield from self._on_snapshot(record, ctx)
         else:
             yield from self._on_frame(record, ctx)
@@ -111,11 +115,17 @@ class BookTransform:
         ``bootstrap`` discards whatever is entirely in the past by itself, and a
         frame straddling the new snapshot is exactly what it is looking for.
         """
+        payload = payload_of(record)
         self._snapshot = self._adapter.parse_snapshot(
-            payload_of(record),
+            payload,
             receive_ts=record["receive_ts"],
             monotonic_ts=record["monotonic_ts"],
         )
+        # Even an ignored snapshot moves the cursor where the venue numbered
+        # it, which an in-band venue does. Skipping this makes the next frame
+        # look like a skip, and the "repair" is another snapshot that does the
+        # same thing again.
+        self._adapter.advance(payload)
         if self._live:
             return
         yield from self._try_bootstrap(ctx)
@@ -171,7 +181,7 @@ class BookTransform:
 
         self.bootstraps += 1
         self._book.clear()
-        self._adapter.bootstrapped()
+        self._adapter.bootstrapped(self._snapshot)
         ctx.logger.info(
             "bootstrapped",
             snapshot_seq=self._snapshot.final_seq,

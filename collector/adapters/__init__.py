@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from collector.adapters.base import Venue
 from collector.adapters.binance import BinanceAdapter
+from collector.adapters.coinbase import CoinbaseAdapter
 from collector.settings import CollectorSettings
 
 
@@ -28,12 +29,14 @@ def build(settings: CollectorSettings) -> Venue:
         return BinanceAdapter(
             depth_interval_ms=settings.depth_interval_ms,
             snapshot_limit=settings.snapshot_limit,
-            **_endpoints(settings),
+            **_endpoints(settings, "ws_url", "rest_url"),
         )
+    if settings.venue == "coinbase":
+        return CoinbaseAdapter(**_endpoints(settings, "ws_url"))
     raise ValueError(f"no adapter for venue {settings.venue!r}")
 
 
-def _endpoints(settings: CollectorSettings) -> dict[str, str]:
+def _endpoints(settings: CollectorSettings, *names: str) -> dict[str, str]:
     """Only the overrides that were actually set; the adapter owns the rest."""
-    overrides = {"ws_url": settings.ws_url, "rest_url": settings.rest_url}
-    return {name: value for name, value in overrides.items() if value}
+    values = {name: getattr(settings, name) for name in names}
+    return {name: value for name, value in values.items() if value}

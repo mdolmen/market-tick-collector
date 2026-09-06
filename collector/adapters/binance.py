@@ -9,7 +9,7 @@ sends its snapshot in band; both answer the `in_sequence` / `gap_detected` /
 difference downstream is allowed to see.
 
 Every socket message on this venue is a `depthUpdate` — the probe found no
-control traffic at all — so `classify` never returns `None` here. The
+control traffic at all — so `classify` never returns `control` here. The
 snapshot is told apart by its stream tag rather than by its content, because
 it did not arrive on the socket in the first place.
 """
@@ -20,12 +20,12 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from collector.adapters.base import (
-    BootstrapOutcome,
     BootstrapResult,
     Level,
     Snapshot,
     SnapshotRequest,
     Update,
+    bootstrap_by_sequence,
 )
 from collector.capture import Kind
 from collector.model import SCALE, scaled_int
@@ -88,6 +88,10 @@ class BinanceAdapter:
         """None: Binance takes the subscription in the URL path."""
         return ()
 
+    def resubscribe_frames(self, symbol: str) -> tuple[str, ...]:
+        """None: a stale book here is repaired by refetching over REST."""
+        return ()
+
     def stream_tag(self, symbol: str) -> str:
         return stream_name(symbol, self._depth_interval_ms)
 
@@ -100,8 +104,12 @@ class BinanceAdapter:
 
     # --- parsing -----------------------------------------------------------
 
-    def classify(self, stream: str, payload: Mapping[str, Any]) -> Kind | None:
-        """By stream tag: the snapshot never came over the socket."""
+    def classify(self, stream: str, payload: Mapping[str, Any]) -> Kind:
+        """By stream tag: the snapshot never came over the socket.
+
+        Never `control`: every message on a raw depth stream is a
+        `depthUpdate`, which the Phase 2 probe confirmed over a live session.
+        """
         return "snapshot" if stream == REST_DEPTH_STREAM else "frame"
 
     def sequence_ids(self, payload: Mapping[str, Any]) -> tuple[int, int]:
@@ -165,23 +173,22 @@ class BinanceAdapter:
         Collapsing both into "retry" refetches on the second case, which is a
         bootstrap loop that occasionally spins.
         """
-        for index, update in enumerate(buffered):
-            if update.final_seq <= snapshot.final_seq:
-                continue  # entirely in the past — discard
-            if self.snapshot_stale(update.first_seq, snapshot.final_seq):
-                return BootstrapResult(BootstrapOutcome.SNAPSHOT_TOO_OLD)
-            return BootstrapResult(BootstrapOutcome.READY, index)
-        return BootstrapResult(BootstrapOutcome.BUFFER_BEHIND)
+        return bootstrap_by_sequence(self, buffered, snapshot)
 
-    def bootstrapped(self) -> None:
+    def bootstrapped(self, snapshot: Snapshot) -> None:
         """A snapshot has been spliced in; the next event is the straddler.
 
         The cursor resets to `None` rather than to `lastUpdateId`: the
         straddler legitimately starts *before* `S + 1`, so the chain rule
-        would reject the one event the bootstrap just proved correct.
+        would reject the one event the bootstrap just proved correct. The
+        snapshot is therefore unused here, and is in the signature for
+        Coinbase, whose boundary falls between messages rather than inside one.
         """
         self._prev_final_id = None
         self._snapshot_required = False
+
+    def advance(self, payload: Mapping[str, Any]) -> None:
+        """No-op: no control traffic, and the REST snapshot is outside the chain."""
 
     def in_sequence(self, update: Update) -> bool:
         """`U == prev_u + 1`. Ranges chain; single sequence numbers do not."""

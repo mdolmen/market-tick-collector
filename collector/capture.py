@@ -21,6 +21,14 @@ that subscription is a subscription change rather than a format migration.
 **``seq`` is the capture's own counter**, not a venue id. It is arrival order,
 which is what makes a reordering fault expressible — and it is the only
 ordering a replay can trust before anything has been parsed.
+
+**Control traffic is landed, not discarded.** A subscription ack carries no
+book state and produces no rows, so dropping it looks free. It is not: Coinbase
+numbers *every* message on a connection, acks included, so a capture missing
+one has a hole in the sequence and replays as a phantom gap. Measured, not
+assumed — Phase 2's probe found the ack at ``sequence_num`` 2 sitting between
+two book messages at 1 and 3, with no break in 317 messages. A venue whose
+control traffic sits outside its sequence simply never emits this kind.
 """
 
 from __future__ import annotations
@@ -29,7 +37,7 @@ import json
 from collections.abc import Mapping
 from typing import Any, Literal, TypedDict
 
-Kind = Literal["frame", "snapshot"]
+Kind = Literal["frame", "snapshot", "control"]
 
 
 class CaptureRecord(TypedDict):

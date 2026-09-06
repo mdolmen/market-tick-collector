@@ -103,6 +103,7 @@ class FrameSource:
         self._snapshot_seq: int | None = None
         self._skipped = False
         self._refetches = 0
+        self._resubscribes = 0
         self._last_snapshot_at = 0.0
 
     def fetch(self, ctx: RunContext) -> Iterator[CaptureRecord]:
@@ -130,21 +131,43 @@ class FrameSource:
                 if record is None:
                     break
                 yield record
-                if self._snapshot_due(ctx):
+                if not self._snapshot_due(ctx):
+                    continue
+                # One decision, two actions. Out of band we fetch and land the
+                # result ourselves; in band we ask the venue and its answer
+                # arrives as an ordinary record a few messages later.
+                if self._snapshot_request is not None:
                     yield self._snapshot_record(ctx)
+                else:
+                    self._resubscribe(ws, ctx)
             self._report(ctx, time.monotonic() - started)
+
+    def _resubscribe(self, ws: ClientConnection, ctx: RunContext) -> None:
+        """Ask an in-band venue for a fresh snapshot, and land nothing yet."""
+        frames = self._venue.resubscribe_frames(self.symbol)
+        if not frames:
+            return
+        for frame in frames:
+            ws.send(frame)
+        self._resubscribes += 1
+        self._last_snapshot_at = time.monotonic()
+        # The skip has been acted on. Leaving it latched asks again on the very
+        # next record, before the answer has had time to arrive.
+        self._skipped = False
+        ctx.logger.info("resubscribed for a snapshot", stream=self._stream)
 
     # --- receiving ---------------------------------------------------------
 
     def _recv(
         self, ws: ClientConnection, ctx: RunContext, deadline: float
     ) -> CaptureRecord | None:
-        """Next landable record, or None once the duration is up or a SIGTERM.
+        """Next record, or None once the duration is up or a SIGTERM arrived.
 
-        Control traffic — subscription acks, heartbeats, status — is counted
-        and dropped here rather than landed. It carries no book state, and
-        landing it would put messages in a capture that the replay's fault
-        injector would then have to know to leave alone.
+        Control traffic is landed like everything else. It carries no book
+        state, so dropping it looks free — but Coinbase numbers acks in the
+        same sequence as book messages, and a capture missing one replays as a
+        gap that never happened. ``FaultInjector`` already leaves every
+        non-frame record alone, so landing it costs nothing downstream.
         """
         while True:
             remaining = deadline - time.monotonic()
@@ -162,9 +185,6 @@ class FrameSource:
             # record model is the transform's cost, not the capture worker's.
             payload = json.loads(text)
             kind = self._venue.classify(self._stream, payload)
-            if kind is None:
-                self._control += 1
-                continue
             self._track(kind, payload)
             return self._record(
                 stream=self._stream,
@@ -175,13 +195,32 @@ class FrameSource:
             )
 
     def _track(self, kind: Kind, payload: Any) -> None:
-        """Advance the fetch-decision state. No-op with no fetch to decide."""
+        """Advance the snapshot-decision state.
+
+        Both paths track the sequence, because both need to know when the
+        socket skipped — the out-of-band one to refetch, the in-band one to
+        resubscribe. Only the action differs, which is why the tracking is
+        shared and the branch is one line in ``fetch``.
+        """
         if kind == "snapshot":
             self._snapshots += 1
+            self._snapshot_seq = self._venue.snapshot_seq(payload)
+            self._first_seq_since_snapshot = None
+            self._last_snapshot_at = time.monotonic()
+            # An in-band snapshot occupies a sequence number of its own, so it
+            # moves the cursor. Without this the frame after every snapshot
+            # fails the chain rule, which asks for another snapshot, which is a
+            # resubscribe loop — 42 of them in a 25s run before this line.
+            self._prev_final_seq = self._venue.snapshot_seq(payload)
+            self._skipped = False
+            return
+        if kind == "control":
+            self._control += 1
+            # Numbered like anything else on a venue that counts them, so it
+            # moves the cursor or the next frame looks like it skipped.
+            self._prev_final_seq = self._venue.sequence_ids(payload)[1]
             return
         self._frames += 1
-        if self._snapshot_request is None:
-            return
         first_seq, final_seq = self._venue.sequence_ids(payload)
         # Judged against the *previous* frame, so it has to happen before the
         # cursor moves.
@@ -203,10 +242,10 @@ class FrameSource:
         buffering fixes it. A break in the chain means the socket skipped, and
         the book downstream is about to go untrusted with nothing to repair it.
 
-        A venue that sends its own snapshot never reaches any of this.
+        On an in-band venue ``snapshot_stale`` is always false — there is no
+        fetch window for updates to be lost in — so only the skip and the
+        interval can fire, and both resolve to a resubscribe.
         """
-        if self._snapshot_request is None:
-            return False
         if self._snapshot_seq is None or self._first_seq_since_snapshot is None:
             return False
         if self._venue.snapshot_stale(
@@ -307,4 +346,5 @@ class FrameSource:
             frames_per_s=round(self._frames / elapsed_s, 1) if elapsed_s else 0.0,
             snapshots=self._snapshots,
             control=self._control,
+            resubscribes=self._resubscribes,
         )
