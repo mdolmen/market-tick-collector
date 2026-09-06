@@ -42,6 +42,18 @@ uv run python -c "import pyarrow.dataset as ds; \
     print(ds.dataset('data/l2/l2/levels', format='parquet').to_table().num_rows)"
 ```
 
+### Seeing a book
+
+The book is in-memory and dies with the run, so read it back out of what landed:
+
+```bash
+uv run python -m tools.book --depth 10
+```
+
+It replays the rows — ordered by the venue's `seq`, not by our clock — into the same `Book`
+the collector used. The level counts it prints should match the ones the run logged at exit;
+that they do is the standing check that the landed rows are enough to reproduce book state.
+
 ### Configuration
 
 Environment only, `MTC_` prefixed — there are no command-line flags.

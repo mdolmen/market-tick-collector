@@ -38,7 +38,7 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 [tool.mypy]
 python_version = "3.11"
 strict = true
-files = ["collector", "tests", "bench"]
+files = ["collector", "tests", "bench", "tools"]
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
