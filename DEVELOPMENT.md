@@ -369,3 +369,86 @@ Three things follow, and none of them were on the plan:
 - **`snapshot_interval_s` is a real tuning knob, and it was not in the plan.** It exists
   because an injected fault cannot conjure its own repair; it turns out to also set the
   worst-case untrusted interval, and Phase 8's Oracle 1 reads the same records.
+
+---
+
+## Phase 2 — venue adapters
+
+### No prediction to grade
+
+Phases 0 and 1 predicted a number and were graded against it. This phase has no performance
+claim to make: it moves the venue behind a boundary and adds a second dialect, and the only
+number it produces is clock skew. Inventing a prediction to keep the format would be
+ceremony. The measurement below is a *survey*, and it was taken before any adapter was
+written precisely so the adapters could not be written from memory.
+
+### The channel surface
+
+`uv run python -m tools.probe <venue>`, 12-15s per venue, 2026-09-06. One BTC book channel
+each, live, unauthenticated.
+
+| | Binance spot | Coinbase Advanced Trade | Kraken v2 |
+|---|---|---|---|
+| Endpoint | `stream.binance.com:9443/ws` | `advanced-trade-ws.coinbase.com` | `ws.kraken.com/v2` |
+| Subscribe | URL path | JSON frame | JSON frame |
+| Snapshot | out of band, REST | **in band**, ~4.9 MB | **in band**, depth-limited |
+| Sequencing | range `[U, u]`, chained | `sequence_num`, +1 per message | **none** |
+| Revalidation | — | — | CRC32 per update |
+| Non-book shapes | 0 | 1 (`subscriptions`) | 3 (`heartbeat`, `status`, ack) |
+| Level encoding | `[str, str]` pairs | named fields, strings | named fields, **JSON numbers** |
+| Timestamp | `E`, epoch ms | RFC3339, ns in envelope | RFC3339, µs |
+| Deepest fraction | 8 | 8 | 8 |
+| msg/s observed | 10.1 | 15.0 | 7.1 |
+
+**One project-wide `SCALE = 8` holds.** All three venues quote to eight decimal places and no
+further, on both price and size, so a single scale keeps `price_ticks` comparable without a
+consumer knowing the venue. `scaled_int` already refuses to truncate, so a venue that ever
+exceeds it fails the run rather than corrupting a book key.
+
+### Four things the survey changed
+
+**The Coinbase feed choice decides whether the venue has gap detection at all.** The obvious
+public endpoint — `ws-feed.exchange.coinbase.com`, channel `level2_batch` — delivers
+`l2update` messages whose fields are `changes`, `product_id`, `time`, `type`. There is no
+sequence number anywhere in them. An adapter on that feed cannot detect a dropped message by
+any means, and would apply diffs to a book that drifts silently while staying plausible.
+Advanced Trade's `level2` carries `sequence_num` on the envelope and is the feed this project
+uses. Two endpoints for nominally the same data, and only one of them is adaptable.
+
+**An in-band snapshot blows through the `websockets` default frame cap.** The library caps a
+message at 1 MiB and closes the connection when one exceeds it; Coinbase's BTC-USD snapshot
+is ~4.9 MB, so the first probe died 0.7s in with `1009 (message too big)` mid-snapshot. This
+never surfaced in Phases 0 and 1 because Binance's snapshot arrives over REST and its diff
+frames are small. `connect(..., max_size=…)` has to be raised for any in-band venue — raised
+rather than disabled, since unbounded lets a venue drive our allocator.
+
+**Kraken quotes prices as JSON numbers.** `{"price":79864.2,"qty":0.00000000}` — not strings.
+`json.loads` therefore produces a Python float, and the project's hardest rule is that prices
+are never floats. The venue's own decimal token is recoverable only by decoding with
+`parse_float=str`; the probe reported *zero* decimal places on Kraken until it did, because no
+price on that venue was ever a string. Two consequences worth writing down now: the CRC32
+input is the token, not the value, so a float round-trip would break the checksum before it
+could validate anything; and `orjson` and `msgspec` offer no `parse_float` hook, so Phase 0's
+decoder ranking does not carry over to this venue unchanged.
+
+**`datetime.fromisoformat` silently truncates nanoseconds.** Coinbase's envelope clock has
+nine fractional digits (`…:25.933594987Z`) and `fromisoformat` returns a `datetime` with six,
+without raising. The model's contract is one unit — ns — throughout, so the adapter parses the
+fractional part itself rather than going through `datetime`.
+
+### Kraken does not ship this phase
+
+The plan made this conditional on one question: does Kraken's book channel carry a
+per-message sequence? It does not. Its `data[]` entries are `symbol`, `bids`, `asks`,
+`checksum`, `timestamp`, and the checksum is the whole of its integrity story.
+
+The CRC32 was deferred from this phase as a Kraken-only concern. With no sequence, deferring
+it does not leave Kraken with weaker gap detection — it leaves Kraken with **none**:
+`in_sequence` would return `True` unconditionally and the book would drift silently, the
+failure mode `NOTES.md` § *Steady state* names as the worst available. So Kraken moves to its
+own phase and lands with the checksum as one coherent piece.
+
+Binance and Coinbase already span two of the dialect table's three rows, which is what forces
+the `in_sequence` / `gap_detected` / `snapshot_required` contract to mean two genuinely
+different things. A third venue with no gap detection would have added a venue and subtracted
+a guarantee.

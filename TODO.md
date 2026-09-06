@@ -35,18 +35,44 @@ is a legal `Source` and `WorkerApp` ran it untouched, so Phase 0 needed **zero**
 
 ## Phase 2 · Venue adapters
 
-- [ ] Verify each venue's live channel surface before writing its adapter
-- [ ] Fill the Coinbase row of the venue-limits table: cap, rate limits, disconnect policy
+- [x] Verify each venue's live channel surface before writing its adapter
+- [x] Fill the Coinbase row of the venue-limits table with what a probe can establish;
+      the cap and the rate limit are not among them and bind in Phase 3
+- [ ] `VenueAdapter` / `VenueTransport` protocols; Binance refactored onto them, behaviour
+      unchanged and the Phase 1 byte-reproducibility test untouched
 - [ ] Binance adapter: overlapping ranges, out-of-band REST snapshot, `U == prev_u + 1`
-- [ ] Coinbase adapter: in-band snapshot, monotonic sequence
-- [ ] Kraken adapter: in-band snapshot, CRC32 over the top 10, one depth per symbol
+- [ ] Coinbase adapter: in-band snapshot, `sequence_num`, Advanced Trade `level2`
+- [ ] Raise `max_size` on the socket — an in-band snapshot exceeds the 1 MiB default
 - [ ] Adapters expose only `in_sequence` / `gap_detected` / `snapshot_required` upward
+- [ ] `classify` returns `Kind | None`; `None` is a venue's control traffic, dropped
 - [ ] Nothing downstream of an adapter may learn which venue a record came from
 - [ ] Resolve the symbol set: base assets overlapping all three venues
 - [ ] Symbol normalization table — consumer-side business logic, never in the SDK
 - [ ] Prices as integer ticks or `Decimal`; never float, anywhere
+- [ ] One project-wide `SCALE = 8`; all three venues measured at eight places
 - [ ] Capture `exchange_ts`, `receive_ts`, `monotonic_ts`, one unit (ns) throughout
-- [ ] Measure clock skew per venue and export it as a metric
+- [ ] Parse RFC3339 fractions directly — `fromisoformat` truncates ns to µs in silence
+- [ ] Measure clock skew per venue and commit the number
+
+`RunContext` carries no metrics handle and `StandardMetrics` is owned by `WorkerApp`, so
+nothing inside a source or transform can export a series today. Skew is *measured* here and
+*exported* in Phase 4, where the metric-surface change is already a deliberate §8 item.
+Doing it twice is worse than doing it once.
+
+## Phase 2.5 · Kraken
+
+Split out of Phase 2 once the probe showed Kraken's book channel carries no sequence of any
+kind. The checksum is not a supplementary check there, it is the only one — so the adapter
+and the CRC32 are one deliverable and cannot be sequenced apart.
+
+- [ ] Kraken adapter: in-band snapshot, one depth per symbol
+- [ ] CRC32 over the top 10, validated inline, latching `snapshot_required` on mismatch
+- [ ] Decode with `parse_float=str` — Kraken quotes price and qty as JSON numbers, and the
+      token is what the checksum is computed over
+- [ ] Re-run the Phase 6 book benchmark with the checksum in the loop: it makes the ordered
+      top-N read per-frame, which is the read a plain `dict` is worst at
+- [ ] Confirm whether a depth-limited channel can run alongside full depth per symbol;
+      if not, Phase 8's Oracle 2 does not exist for this venue and the CRC is its oracle
 
 ## Phase 3 · Connection supervision & sharding
 
@@ -121,7 +147,8 @@ is a legal `Source` and `WorkerApp` ran it untouched, so Phase 0 needed **zero**
 - [ ] Align oracle 2 by update id, never by clock; keep a ring of recent top-N versions
 - [ ] Compare the top N−1 levels to avoid the truncation boundary artifact
 - [ ] Oracle 3: replay harness injected faults; target detection of 100%
-- [ ] Kraken CRC32 validated inline as a fourth, venue-native check
+- [ ] Kraken CRC32 as a fourth, venue-native check — built in Phase 2.5, not here, because
+      it is that venue's only gap detection rather than an extra oracle
 - [ ] Break classification: missing, duplicate, value mismatch, timing
 - [ ] Configurable tolerance rules, break report, idempotent re-run
 - [ ] Report every oracle's break count separately, never merged into one number
