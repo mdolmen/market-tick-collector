@@ -69,3 +69,58 @@ def capture(
     if len(frames) in snapshots:
         append("snapshot", binance.REST_DEPTH_STREAM, snapshots[len(frames)])
     return records
+
+
+# --- synthetic sessions ----------------------------------------------------
+#
+# Fault behaviour is entirely about sequencing, and the recorded session is
+# twelve frames long with the snapshot near the end — so almost every frame in
+# it is discarded by the splice and a fault there tests nothing. These build a
+# session of any length with snapshots wherever they are wanted. The recorded
+# fixture stays for the splice itself, where real ranges are the point.
+
+_BASE_ID = 1_000_000
+_IDS_PER_FRAME = 10
+_BID_TICKS = 50_000_00000000
+_TICK = 1_00000000
+
+
+def synthetic_frame(index: int) -> dict[str, Any]:
+    """Frame ``index``: a contiguous id range and one level a side."""
+    first = _BASE_ID + index * _IDS_PER_FRAME
+    price = _BID_TICKS + (index % 5) * _TICK
+    return {
+        "e": "depthUpdate",
+        "E": 1_700_000_000_000 + index,
+        "s": "BTCUSDT",
+        "U": first,
+        "u": first + _IDS_PER_FRAME - 1,
+        "b": [[f"{price / 10**8:.8f}", f"{1 + index % 3}.00000000"]],
+        "a": [[f"{(price + _TICK * 10) / 10**8:.8f}", "2.00000000"]],
+    }
+
+
+def synthetic_snapshot(before_index: int) -> dict[str, Any]:
+    """A snapshot current as of just before frame ``before_index``.
+
+    ``lastUpdateId`` sits one below that frame's ``U``, so the frame straddles
+    it and the splice starts exactly there.
+    """
+    return {
+        "lastUpdateId": _BASE_ID + before_index * _IDS_PER_FRAME - 1,
+        "bids": [[f"{_BID_TICKS / 10**8:.8f}", "1.00000000"]],
+        "asks": [[f"{(_BID_TICKS + _TICK * 10) / 10**8:.8f}", "2.00000000"]],
+    }
+
+
+def synthetic_capture(
+    *, count: int, snapshot_every: int = 0
+) -> list[CaptureRecord]:
+    """``count`` chained frames, with a snapshot at 0 and every ``n`` after."""
+    positions = {0}
+    if snapshot_every > 0:
+        positions |= set(range(snapshot_every, count, snapshot_every))
+    return capture(
+        snapshots={index: synthetic_snapshot(index) for index in sorted(positions)},
+        frames=[json.dumps(synthetic_frame(i)) for i in range(count)],
+    )
