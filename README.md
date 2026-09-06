@@ -7,11 +7,23 @@ This is not a crypto project. Crypto because free high-volume L2 data. No tradin
 
 ## Status
 
-**Phase 1 — capture & replay harness.** One venue (Binance spot), one symbol, full-depth
-diffs, bootstrapped over the REST snapshot splice, applied into a book, landed as a Parquet
-dataset. The collector is split along the SDK's ingest/transform boundary, so a session can
-be captured verbatim and replayed from disk — with faults injected — through the *same* book
-code a socket drives.
+**Phase 2 — venue adapters.** Two venues (Binance spot, Coinbase Advanced Trade), one symbol
+per process, full-depth diffs, applied into a book and landed as a Parquet dataset. The
+collector is split along the SDK's ingest/transform boundary, so a session can be captured
+verbatim and replayed from disk — with faults injected — through the *same* book code a
+socket drives.
+
+The venue now sits behind a `VenueAdapter` protocol: the book, the sink and the fault
+injector are handed normalized records and cannot tell which venue produced them.
+`tests/test_boundary.py` asserts that statically rather than trusting it. The two venues span
+two different sequencing dialects — Binance chains overlapping `[U, u]` ranges and bootstraps
+from an out-of-band REST snapshot, Coinbase chains a single per-connection `sequence_num` and
+sends its snapshot in band — which is what makes the boundary load-bearing rather than
+decorative.
+
+Kraken is deferred to its own phase: its book channel carries no sequence number at all, so
+its CRC32 checksum is not a supplementary check but its *only* gap detection, and the adapter
+cannot ship before it. `DEVELOPMENT.md` § Phase 2 has the channel survey behind that call.
 
 Two numbers, and they are never merged:
 
@@ -72,14 +84,15 @@ Environment only, `MTC_` prefixed — there are no command-line flags.
 
 | | | |
 |---|---|---|
-| `MTC_SYMBOL` | `BTCUSDT` | one symbol, Binance spot |
+| `MTC_VENUE` | `binance` | `binance` or `coinbase`; a venue is a process |
+| `MTC_SYMBOL` | `BTCUSDT` | one symbol, in the venue's own spelling |
 | `MTC_DURATION_S` | `60` | how long the bounded run lasts |
 | `MTC_OUTPUT` | `parquet` | `parquet` or `console` |
-| `MTC_DEPTH_INTERVAL_MS` | `100` | diff channel cadence |
-| `MTC_SNAPSHOT_LIMIT` | `5000` | REST snapshot depth |
-| `MTC_SNAPSHOT_INTERVAL_S` | `300` | land a snapshot this often even when healthy |
+| `MTC_DEPTH_INTERVAL_MS` | `100` | diff channel cadence (Binance) |
+| `MTC_SNAPSHOT_LIMIT` | `5000` | REST snapshot depth (Binance) |
+| `MTC_SNAPSHOT_INTERVAL_S` | `300` | refresh the snapshot this often even when healthy |
 | `MTC_MODE` | `collect` | `collect`, `capture` or `replay` |
-| `MTC_RAW_CHANNEL` | `binance-depth` | capture/replay channel name |
+| `MTC_RAW_CHANNEL` | `<venue>-depth` | capture/replay channel name |
 | `MTC_REPLAY_SPEED` | unset | `1`/`10`/`100`; unset means the ceiling |
 | `MTC_FAULTS` | unset | `drop,reorder,duplicate,clock_jitter,burst` |
 | `MTC_FAULT_SEED` | `0` | makes any fault run reproducible |
@@ -117,6 +130,31 @@ MTC_FAULTS=drop,reorder,duplicate MTC_FAULT_SEED=7 \
 
 Same capture and same seed replays byte-identical; a different seed does not.
 
+The other venue is the same three commands with one variable changed, which is the whole
+claim the adapter boundary makes:
+
+```bash
+RAW_BUCKET_URL="file://$PWD/data/capture" \
+MTC_VENUE=coinbase MTC_SYMBOL=BTC-USD MTC_MODE=capture \
+MTC_DURATION_S=40 MTC_SNAPSHOT_INTERVAL_S=10 \
+    uv run python -m collector.main
+```
+
+On Coinbase the snapshot arrives in band, so `MTC_SNAPSHOT_INTERVAL_S` drives an
+unsubscribe/subscribe pair rather than a REST fetch — the venue never re-sends one unasked.
+
+## Venue reconnaissance
+
+Before an adapter is written, the venue's live channel is *looked at* rather than recalled:
+
+```bash
+uv run python -m tools.probe coinbase --duration 30   # message shapes, clocks, precision
+uv run python -m tools.symbols                        # the overlapping base assets
+```
+
+`DEVELOPMENT.md` § Phase 2 records what the survey found, including the two feeds Coinbase
+publishes that differ in whether a lost message is detectable at all.
+
 ## Benchmarks
 
 ```bash
@@ -137,6 +175,11 @@ Tests replay a recorded Binance bootstrap — twelve consecutive frames with a l
 snapshot taken part-way through — so the splice branches are exercised against real sequence
 ranges rather than invented ones. The recovery path is reached through the fault injector: a
 venue will not drop packets on request, and a fault asserted by hand tests the assertion.
+
+The Coinbase suite runs the *same* injector over a stream numbered the way that venue numbers
+it — every message on the connection, acks included. That the injector needed no change to
+work on a second dialect is the actual evidence the boundary holds; it perturbs capture
+records and has never heard of either venue.
 
 One caveat the fault tests state rather than hide: a fault landing on an already-untrusted
 book opens no second interval, so the honest denominator for a detection rate is faults

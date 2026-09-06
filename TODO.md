@@ -38,21 +38,25 @@ is a legal `Source` and `WorkerApp` ran it untouched, so Phase 0 needed **zero**
 - [x] Verify each venue's live channel surface before writing its adapter
 - [x] Fill the Coinbase row of the venue-limits table with what a probe can establish;
       the cap and the rate limit are not among them and bind in Phase 3
-- [ ] `VenueAdapter` / `VenueTransport` protocols; Binance refactored onto them, behaviour
+- [x] `VenueAdapter` / `VenueTransport` protocols; Binance refactored onto them, behaviour
       unchanged and the Phase 1 byte-reproducibility test untouched
-- [ ] Binance adapter: overlapping ranges, out-of-band REST snapshot, `U == prev_u + 1`
-- [ ] Coinbase adapter: in-band snapshot, `sequence_num`, Advanced Trade `level2`
-- [ ] Raise `max_size` on the socket — an in-band snapshot exceeds the 1 MiB default
-- [ ] Adapters expose only `in_sequence` / `gap_detected` / `snapshot_required` upward
-- [ ] `classify` returns `Kind | None`; `None` is a venue's control traffic, dropped
-- [ ] Nothing downstream of an adapter may learn which venue a record came from
-- [ ] Resolve the symbol set: base assets overlapping all three venues
-- [ ] Symbol normalization table — consumer-side business logic, never in the SDK
-- [ ] Prices as integer ticks or `Decimal`; never float, anywhere
-- [ ] One project-wide `SCALE = 8`; all three venues measured at eight places
-- [ ] Capture `exchange_ts`, `receive_ts`, `monotonic_ts`, one unit (ns) throughout
-- [ ] Parse RFC3339 fractions directly — `fromisoformat` truncates ns to µs in silence
-- [ ] Measure clock skew per venue and commit the number
+- [x] Binance adapter: overlapping ranges, out-of-band REST snapshot, `U == prev_u + 1`
+- [x] Coinbase adapter: in-band snapshot, `sequence_num`, Advanced Trade `level2`
+- [x] Raise `max_size` on the socket — an in-band snapshot exceeds the 1 MiB default
+- [x] Adapters expose only `in_sequence` / `gap_detected` / `snapshot_required` upward
+- [x] `classify` returns frame / snapshot / control; control is landed, not dropped, because
+      a venue may number it in the same sequence as its book messages
+- [x] `advance()` moves the cursor past a message that yields no `Update`
+- [x] Repair on an in-band venue is a resubscribe, on the same trigger as a REST refetch
+- [x] Nothing downstream of an adapter may learn which venue a record came from
+- [x] Resolve the symbol set: base assets overlapping all three venues
+- [x] Symbol normalization table — consumer-side business logic, never in the SDK
+- [x] Prices as integer ticks or `Decimal`; never float, anywhere
+- [x] One project-wide `SCALE = 8`; all three venues measured at eight places
+- [x] Capture `exchange_ts`, `receive_ts`, `monotonic_ts`, one unit (ns) throughout
+- [x] Parse RFC3339 fractions directly — `fromisoformat` truncates ns to µs in silence
+- [x] Measure the venue-to-local clock difference per venue and commit the number
+- [ ] Export it as a metric — needs `RunContext` to carry one; Phase 4
 
 ## Phase 2.5 · Kraken
 
@@ -89,6 +93,9 @@ is a legal `Source` and `WorkerApp` ran it untouched, so Phase 0 needed **zero**
 - [ ] Connection supervisor primitive: N connections, per-connection health, no shared fate
 - [ ] Bounded queue primitive with high and low watermarks, not a single threshold
 - [ ] Checkpoint protocol over an opaque token — this consumer's answer is "nothing"
+- [ ] `RunContext` carries a metrics handle — nothing in a `Source` or `Transform` can
+      export a series today, which is why Phase 2 measures clock difference but cannot push it
+- [ ] Clock-difference histogram labelled by venue, deferred from Phase 2
 - [ ] New series `messages_dropped_total`, `queue_depth`, drop reason — a deliberate §8 change
 - [ ] Label them `queue="ring"|"batch"`; `stage` is already taken by the SDK and frozen
 - [ ] Benchmark reader-thread + ring buffer against a pure-asyncio receiver; keep the numbers

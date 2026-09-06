@@ -452,3 +452,74 @@ Binance and Coinbase already span two of the dialect table's three rows, which i
 the `in_sequence` / `gap_detected` / `snapshot_required` contract to mean two genuinely
 different things. A third venue with no gap detection would have added a venue and subtracted
 a guarantee.
+
+### What the second dialect cost, which is the point of having one
+
+Three bugs reached working code and were caught by measurement rather than by review. All
+three are the same shape: an assumption that held for Binance, silently carried into a venue
+where it does not.
+
+**An in-band snapshot occupies a sequence number.** Coinbase numbers every message on the
+connection — book updates, snapshots and subscription acks alike. The source and the transform
+both tracked the sequence across frames only, so the frame *after* every snapshot failed the
+chain rule, which asked for a repair, whose snapshot failed it again: **42 resubscribes in a
+25-second run**, each pulling a 4.9 MB snapshot. Loud, and therefore cheap.
+
+**A stored snapshot goes stale even when it arrived in band.** This one was not loud. The
+reasoning that "an in-band snapshot cannot be stale, there is no fetch window" is true on
+arrival and false thereafter: the transform keeps the last snapshot it saw, and a gap thirty
+seconds later is judged against it. Rebuilding from it silently discards every update in
+between and leaves a plausible-looking book. It showed up only as `crossed_books: 3` under
+fault injection — the invariant check that Phase 0 added for no particular reason.
+
+**A bare RFC3339 timestamp parses as local time.** `datetime.fromisoformat("…T10:00:00")`
+returns a naive datetime that `.timestamp()` then interprets in the machine's zone, so every
+`exchange_ts` would have been wrong by the local UTC offset — correct on a UTC container,
+wrong by an hour on the laptop it was written on. Caught by a test asserting the epoch.
+
+The generalisation worth keeping: **the second venue is not twice the work of the first, it is
+where the first venue's accidents become visible.** Every one of these was latent in Phase 0's
+design and undetectable with one venue in the tree.
+
+### Clock difference per venue: measured here, exported in Phase 4
+
+`TODO.md` asked to measure it *and* export it as a metric. The export half is not reachable
+this phase, and the reason is worth recording rather than working around:
+
+`RunContext` carries `run_id`, `logger`, `clock`, `should_stop` and `http` — **no metrics
+handle**. `StandardMetrics` is constructed and owned by `WorkerApp`, pushed once at exit, and
+its series are labelled `(source, stage)` with no `venue` and no histogram. Nothing inside a
+`Source` or a `Transform` can export a series at all. Exporting therefore needs both an SDK
+change to `RunContext` and a new series — which is exactly the deliberate §8 metric-surface
+change Phase 4 already schedules. Doing it twice is worse than doing it once.
+
+| | p50 | p90 | p99 | frames |
+|---|---|---|---|---|
+| Binance, live 20s | 113.8 ms | 150.8 ms | 367.5 ms | 199 |
+| Coinbase, 40s capture | **−7.4 ms** | 177.6 ms | 432.5 ms | 624 |
+
+**It is not clock skew, and the negative p50 is why that matters.** The quantity is
+`receive_ts − exchange_ts`: one-way network delay *plus* the offset between the venue's clock
+and ours, and the two are not separable without a round-trip estimate this collector never
+makes. A negative median means Coinbase's stamps sit ahead of our clock by more than the
+delay — so the number bounds delay from above and flags drift, and claiming anything more
+precise from it would be false. It also inherits our own clock discipline: `receive_ts` is a
+wall clock, and an NTP step lands in this distribution as a spike no venue caused.
+
+Binance's 113.8 ms median is partly the channel: `E` is the event time and the diff channel
+aggregates on a 100 ms cadence, so roughly half a window is built in before any network.
+
+### Symbols: 188 base assets, and one that nearly went missing
+
+188 base assets are quoted against a USD-ish asset on all three venues (Binance USDT,
+Coinbase USD, Kraken USD), resolved against live instrument lists and committed with
+`tools/symbols.py` to re-derive them.
+
+The mapping is a rule plus two exceptions rather than a 564-row table. The exceptions are
+Kraken's pre-ISO `XBT` and `XDG`, and how they surfaced is the useful part: the first
+generator intersected the three venues **on their own base keys** and reported zero mapping
+failures. Bitcoin never appears as `BTC` on Kraken, so it dropped out of the intersection
+entirely — and the rule scored perfectly *because the one case that would have broken it had
+been excluded from the sample*. A validator whose sample is filtered by the thing it is
+validating always passes. The generator now matches on the symbol the rule produces, so an
+unmapped code fails loudly instead of vanishing.
