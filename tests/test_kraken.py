@@ -97,10 +97,11 @@ def test_the_live_session_rebuilds_without_a_single_gap() -> None:
 def test_the_cached_window_agrees_with_a_full_recompute() -> None:
     """The top ten is cached and rebuilt only when a write could have moved it.
 
-    That optimisation is worth 11x (75.5us -> 6.5us a message at depth 1000)
-    and it is exactly the kind that stays correct for a thousand messages and
-    then is not. So it is checked against the naive recomputation on every
-    message of the live session, which is the thing it replaced.
+    That optimisation is worth 8.7x (`bench/checksum.py`: 73.9us -> 8.5us a
+    message at depth 1000) and it is exactly the kind that stays correct for a
+    thousand messages and then is not. So it is checked against the naive
+    recomputation on every message of the live session, which is the thing it
+    replaced.
     """
     adapter = KrakenAdapter(depth=1000)
     bids: dict[str, str] = {}

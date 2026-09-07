@@ -126,17 +126,21 @@ class _Side:
 
     **Why it is not a plain `dict` scanned per message.** The checksum makes an
     ordered top-N read a *per-frame* cost, which is the read `NOTES.md`
-    § *Book representation* names as the one a `dict` is worst at. Measured on
-    the landed session at depth 1000, per book message:
+    § *Book representation* names as the one a `dict` is worst at. From
+    `bench/checksum.py` over a landed 5129-message session at depth 1000, per
+    book message:
 
-        sorted(str keys, key=float)              75.5 us   <- the obvious one
-        heapq over int keys, tokens cached       25.1 us
-        the same, rebuilt only when it can move   6.5 us   <- this
+        sort the side, per message              73.9 us   <- the obvious one
+        int keys, token cached per level        26.0 us
+        rebuilt only when it can move            8.5 us   <- this
 
-    The last one is this class. Almost nothing moves the top ten: the session's
-    median message touches **one** level, and only 18.5% of sides needed a
-    rebuild at all. So the window is cached with the price that bounds it, and
-    a message that cannot have disturbed it does not pay for one.
+    The last one is this class, and the last figure is the whole of `observe`
+    rather than this class alone — it includes building the normalized levels,
+    which the other two rows do not do. Almost nothing moves the top ten: the
+    session's median message touches **one** level, and only 18.5% of sides
+    needed a rebuild at all. So the window is cached alongside the price that
+    bounds it, and a message that cannot have disturbed it does not pay for
+    one.
     """
 
     __slots__ = ("_bound", "_cached", "_descending", "_dirty", "_levels", "_window")
