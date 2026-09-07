@@ -113,11 +113,11 @@ class FrameSource:
 
     def fetch(self, ctx: RunContext) -> Iterator[CaptureRecord]:
         with connect(
-            self._venue.ws_url(self.symbol),
+            self._venue.ws_url([self.symbol]),
             close_timeout=_CLOSE_TIMEOUT_S,
             max_size=_MAX_MESSAGE_BYTES,
         ) as ws:
-            for frame in self._venue.subscribe_frames(self.symbol):
+            for frame in self._venue.subscribe_frames([self.symbol]):
                 ws.send(frame)
             ctx.logger.info(
                 "connected", stream=self._stream, deadline_s=self._duration_s
@@ -178,7 +178,7 @@ class FrameSource:
 
     def _resubscribe(self, ws: ClientConnection, ctx: RunContext) -> None:
         """Ask an in-band venue for a fresh snapshot, and land nothing yet."""
-        frames = self._venue.resubscribe_frames(self.symbol)
+        frames = self._venue.resubscribe_frames([self.symbol])
         if not frames:
             return
         for frame in frames:

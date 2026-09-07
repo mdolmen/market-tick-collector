@@ -245,19 +245,25 @@ class KrakenAdapter:
 
     # --- transport ---------------------------------------------------------
 
-    def ws_url(self, symbol: str) -> str:
+    def ws_url(self, symbols: Sequence[str]) -> str:
         return self._ws_url
 
-    def subscribe_frames(self, symbol: str) -> tuple[str, ...]:
-        return (self._frame("subscribe", symbol),)
+    def subscribe_frames(self, symbols: Sequence[str]) -> tuple[str, ...]:
+        """One frame for the shard: `params.symbol` is already a list.
 
-    def resubscribe_frames(self, symbol: str) -> tuple[str, ...]:
+        The venue answers with one ack and one snapshot **per symbol**, not one
+        of each for the frame — measured over a three-symbol subscribe in
+        Phase 3, which returned three of each.
+        """
+        return (self._frame("subscribe", symbols),)
+
+    def resubscribe_frames(self, symbols: Sequence[str]) -> tuple[str, ...]:
         """Unsubscribe then subscribe — the Coinbase pattern, same reason.
 
         The venue never re-sends a snapshot unasked, so a book that has failed
         its checksum can only be repaired by asking for one.
         """
-        return (self._frame("unsubscribe", symbol), self._frame("subscribe", symbol))
+        return (self._frame("unsubscribe", symbols), self._frame("subscribe", symbols))
 
     def stream_tag(self, symbol: str) -> str:
         return f"{_CHANNEL}:{symbol.upper()}"
@@ -266,13 +272,13 @@ class KrakenAdapter:
         """None: the snapshot arrives on the socket, so there is nothing to fetch."""
         return None
 
-    def _frame(self, action: str, symbol: str) -> str:
+    def _frame(self, action: str, symbols: Sequence[str]) -> str:
         return json.dumps(
             {
                 "method": action,
                 "params": {
                     "channel": _CHANNEL,
-                    "symbol": [symbol.upper()],
+                    "symbol": [symbol.upper() for symbol in symbols],
                     "depth": self._depth,
                 },
             },

@@ -108,15 +108,20 @@ class CoinbaseAdapter:
 
     # --- transport ---------------------------------------------------------
 
-    def ws_url(self, symbol: str) -> str:
+    def ws_url(self, symbols: Sequence[str]) -> str:
         return self._ws_url
 
-    def subscribe_frames(self, symbol: str) -> tuple[str, ...]:
-        return (self._frame("subscribe", symbol),)
+    def subscribe_frames(self, symbols: Sequence[str]) -> tuple[str, ...]:
+        """One frame for the whole shard: `product_ids` is already a list.
 
-    def resubscribe_frames(self, symbol: str) -> tuple[str, ...]:
+        Batching is the venue's own model here rather than a workaround, which
+        is what the Phase 2 probe established.
+        """
+        return (self._frame("subscribe", symbols),)
+
+    def resubscribe_frames(self, symbols: Sequence[str]) -> tuple[str, ...]:
         """Unsubscribe then subscribe: the only way to ask for a snapshot."""
-        return (self._frame("unsubscribe", symbol), self._frame("subscribe", symbol))
+        return (self._frame("unsubscribe", symbols), self._frame("subscribe", symbols))
 
     def stream_tag(self, symbol: str) -> str:
         return f"{_CHANNEL}:{symbol.upper()}"
@@ -125,9 +130,13 @@ class CoinbaseAdapter:
         """None: the snapshot arrives on the socket, so there is nothing to fetch."""
         return None
 
-    def _frame(self, action: str, symbol: str) -> str:
+    def _frame(self, action: str, symbols: Sequence[str]) -> str:
         return json.dumps(
-            {"type": action, "product_ids": [symbol.upper()], "channel": _CHANNEL},
+            {
+                "type": action,
+                "product_ids": [symbol.upper() for symbol in symbols],
+                "channel": _CHANNEL,
+            },
             separators=(",", ":"),
         )
 

@@ -340,17 +340,25 @@ class VenueTransport(Protocol):
     """How to connect to one venue and, if it needs one, how to fetch a
     snapshot. Only the capture source sees this."""
 
-    def ws_url(self, symbol: str) -> str:
-        """The socket to open. Some venues encode the subscription here."""
+    def ws_url(self, symbols: Sequence[str]) -> str:
+        """The socket to open for this shard. Some venues encode it here."""
         ...
 
-    def subscribe_frames(self, symbol: str) -> tuple[str, ...]:
+    def subscribe_frames(self, symbols: Sequence[str]) -> tuple[str, ...]:
         """Frames to send once connected, in order.
 
         Empty for a venue that subscribes through the URL path. Kept as a
         sequence because a venue may need a separate frame per channel, and
         because `NOTES.md` § *Connection supervision* batches subscriptions
         against an outbound rate limit.
+
+        **Takes the whole shard, and batching is the point.** Binance allows
+        five outbound frames a second, so subscribing four hundred symbols one
+        at a time would take eighty seconds during which the book is neither
+        bootstrapped nor abandoned. Every venue here can name many symbols in
+        one frame — Coinbase in `product_ids`, Kraken in `params.symbol`,
+        Binance in the URL path — so a shard costs at most one frame and the
+        rate limit stops being a constraint rather than being managed.
         """
         ...
 
@@ -358,8 +366,13 @@ class VenueTransport(Protocol):
         """The `stream` a socket message's capture record carries."""
         ...
 
-    def resubscribe_frames(self, symbol: str) -> tuple[str, ...]:
+    def resubscribe_frames(self, symbols: Sequence[str]) -> tuple[str, ...]:
         """Frames that make an in-band venue send a fresh snapshot.
+
+        Takes a sequence for symmetry with `subscribe_frames`, but the caller
+        passes only the symbols that actually need repairing — a repair is
+        per-symbol, and unsubscribing a healthy book to fix a broken one would
+        turn one untrusted book into a shard's worth.
 
         The in-band counterpart of an out-of-band REST refetch, and the source
         makes the same decision for both — only the action differs. Coinbase

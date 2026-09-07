@@ -81,14 +81,33 @@ class BinanceAdapter:
 
     # --- transport ---------------------------------------------------------
 
-    def ws_url(self, symbol: str) -> str:
-        return f"{self._ws_url}/{self.stream_tag(symbol)}"
+    def ws_url(self, symbols: Sequence[str]) -> str:
+        """Every stream on the shard, in the path: `/ws/<s1>/<s2>/...`.
 
-    def subscribe_frames(self, symbol: str) -> tuple[str, ...]:
+        The raw endpoint takes several streams this way and delivers each
+        message bare, exactly as it does for one. Two alternatives were
+        available and both cost more:
+
+        - The combined endpoint, `/stream?streams=a/b/c`, wraps every message
+          as `{"stream":...,"data":...}`. That is a different landed payload,
+          so it would forfeit the Phase 1 corpus and the byte-reproducibility
+          test that reads it.
+        - A `SUBSCRIBE` frame on a bare `/ws` makes the venue answer with
+          `{"result":null,"id":1}` — control traffic on a stream that has
+          never had any, which `classify` and the source's cursor would both
+          have to learn.
+
+        The path costs neither, and it sends **no outbound frames at all**, so
+        the 5 msg/s limit does not bind on this venue.
+        """
+        streams = "/".join(self.stream_tag(symbol) for symbol in symbols)
+        return f"{self._ws_url}/{streams}"
+
+    def subscribe_frames(self, symbols: Sequence[str]) -> tuple[str, ...]:
         """None: Binance takes the subscription in the URL path."""
         return ()
 
-    def resubscribe_frames(self, symbol: str) -> tuple[str, ...]:
+    def resubscribe_frames(self, symbols: Sequence[str]) -> tuple[str, ...]:
         """None: a stale book here is repaired by refetching over REST."""
         return ()
 
