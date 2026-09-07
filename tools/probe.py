@@ -71,14 +71,21 @@ PROBES: dict[str, Probe] = {
         venue="binance",
         url="wss://stream.binance.com:9443/ws/btcusdt@depth@100ms",
     ),
+    # Advanced Trade, not the older Exchange feed this first pointed at. Phase 2
+    # probed `level2_batch` on `ws-feed.exchange.coinbase.com` while deciding,
+    # `CoinbaseAdapter` settled on Advanced Trade `level2`, and the table was
+    # never moved across — so the default probe spoke a protocol no adapter in
+    # this project speaks, and answered a subscription with
+    # `{"type":"error","reason":"No channels provided"}`. A probe whose default
+    # target is not the thing being built is worse than no default.
     "coinbase": Probe(
         venue="coinbase",
-        url="wss://ws-feed.exchange.coinbase.com",
+        url="wss://advanced-trade-ws.coinbase.com",
         subscribe=(
             {
                 "type": "subscribe",
                 "product_ids": ["BTC-USD"],
-                "channels": ["level2_batch"],
+                "channel": "level2",
             },
         ),
     ),
