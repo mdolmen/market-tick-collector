@@ -18,19 +18,29 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 import urllib.request
 from collections.abc import Sequence
 from typing import Any
 
+from websockets.sync.client import connect
+
 from collector.symbols import OVERLAPPING_BASES, QUOTE, native
 
 _TIMEOUT_S = 30
+_RECV_SLICE_S = 1.0
+_CLOSE_TIMEOUT_S = 2.0
+# The instrument snapshot is ~1400 pairs and exceeds the library's 1 MiB cap,
+# the same way an in-band book snapshot does.
+_MAX_MESSAGE_BYTES = 32 * 1024 * 1024
 
 _BINANCE = "https://api.binance.com/api/v3/exchangeInfo"
 # The Exchange products endpoint is public and lists the same instrument
 # universe as Advanced Trade, whose own products call wants credentials.
 _COINBASE = "https://api.exchange.coinbase.com/products"
-_KRAKEN = "https://api.kraken.com/0/public/AssetPairs"
+# Kraken's instrument list comes off the v2 socket rather than REST — see
+# `kraken_pairs`, and `collector/symbols.py` for what reading REST cost.
+_KRAKEN_WS = "wss://ws.kraken.com/v2"
 
 
 def _get(url: str) -> Any:
@@ -62,18 +72,48 @@ def coinbase_pairs() -> dict[str, str]:
 
 
 def kraken_pairs() -> dict[str, str]:
-    """Keyed off `wsname`, which is the spelling the websocket API accepts.
+    """From the v2 socket's own `instrument` channel, not from REST.
 
-    Not the REST pair name, which is where Kraken's `XBT` for bitcoin lives.
-    Taking `wsname` is why the mapping needs no exception for it.
+    This read REST `AssetPairs.wsname` until Phase 2.5, on the stated grounds
+    that `wsname` "is the spelling the websocket API accepts". It is not:
+    `wsname` is **v1** naming and reports `XBT/USD` and `XDG/USD`, which the v2
+    socket this project speaks rejects with `Currency pair not supported`. That
+    produced a two-entry exception table in `collector/symbols.py` describing a
+    protocol nobody here speaks, and a Kraken run that connected, subscribed,
+    received nothing and exited clean.
+
+    So the authority is the venue telling us what it will accept, on the same
+    connection the collector uses. Nothing else is one.
     """
     suffix = f"/{QUOTE['kraken']}"
     pairs: dict[str, str] = {}
-    for pair in _get(_KRAKEN)["result"].values():
-        name = pair.get("wsname", "")
-        if name.endswith(suffix):
-            pairs[name[: -len(suffix)]] = name
+    for symbol in _kraken_v2_symbols():
+        if symbol.endswith(suffix):
+            pairs[symbol[: -len(suffix)]] = symbol
     return pairs
+
+
+def _kraken_v2_symbols() -> list[str]:
+    """Every symbol in the v2 `instrument` snapshot. Public, no credentials."""
+    with connect(
+        _KRAKEN_WS, max_size=_MAX_MESSAGE_BYTES, close_timeout=_CLOSE_TIMEOUT_S
+    ) as ws:
+        ws.send(
+            json.dumps({"method": "subscribe", "params": {"channel": "instrument"}})
+        )
+        deadline = time.monotonic() + _TIMEOUT_S
+        while time.monotonic() < deadline:
+            try:
+                message = ws.recv(timeout=_RECV_SLICE_S)
+            except TimeoutError:
+                continue
+            payload = json.loads(message)
+            if payload.get("channel") == "instrument" and payload.get("type") == (
+                "snapshot"
+            ):
+                pairs: list[dict[str, Any]] = payload["data"]["pairs"]
+                return [pair["symbol"] for pair in pairs]
+    raise RuntimeError("no instrument snapshot from the Kraken v2 socket")
 
 
 def main(argv: Sequence[str] | None = None) -> int:

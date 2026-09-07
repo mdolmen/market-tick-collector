@@ -17,16 +17,30 @@ symbol. The rule reproduces each venue's own spelling for every overlapping
 base but two, so a hand-maintained table would be hundreds of rows of data
 whose only contribution is opportunities to be wrong.
 
-**The two exceptions are Kraken's, and finding them was not free.** Kraken
-still uses the pre-ISO codes `XBT` for bitcoin and `XDG` for dogecoin. An
-earlier version of this module had no exception table and its generator
-reported zero failures — because `BTC` was never in the resolved set to fail
-on. Kraken lists `XBT/USD`, the intersection quietly dropped bitcoin, and the
-rule looked perfect precisely because the hardest case had been excluded from
-the sample. The test that caught it asserts `BTC` is in the set.
+**The rule has no exceptions, and getting there took two mistakes.** Phase 2
+added a Kraken exception table — `XBT` for bitcoin, `XDG` for dogecoin — after
+the intersection quietly dropped bitcoin, and a test asserting `BTC` is in the
+set is what caught that. The table was right about the symptom and wrong about
+the cause, and Phase 2.5 found out the only way it could: the adapter shipped,
+subscribed to `XBT/USD`, and got
 
-Regenerate with `uv run python -m tools.symbols`; last resolved 2026-09-06
-against live instrument lists.
+    {"error":"Currency pair not supported XBT/USD","success":false}
+
+back from a socket that had just streamed `BTC/USD` happily. The exceptions
+came from Kraken's REST `AssetPairs`, whose `wsname` is **websocket v1**
+naming. The v2 socket this project speaks uses the ISO codes throughout, and
+its own `instrument` channel lists all 188 bases below under them — `XBT` and
+`XDG` do not appear in v2 at all.
+
+So the mapping really is a rule with no exceptions, as the generator always
+claimed; it was reading a spelling for a protocol nobody here speaks. What made
+this expensive is that it fails *silently*: a rejected subscription is an ack
+with `success: false` on a socket that stays open, so the run connects, reports
+zero frames and exits clean.
+
+Regenerate with `uv run python -m tools.symbols`; the set was last resolved
+2026-09-06 against live instrument lists and re-confirmed unchanged 2026-09-07
+against Kraken's v2 `instrument` channel.
 """
 
 from __future__ import annotations
@@ -48,11 +62,12 @@ _SEPARATOR: Final[dict[str, str]] = {
     "kraken": "/",
 }
 
-# Where a venue's code for an asset is not the canonical one. Kraken predates
-# the ISO-ish names the other two use and never migrated.
-_ALIASES: Final[dict[str, dict[str, str]]] = {
-    "kraken": {"BTC": "XBT", "DOGE": "XDG"},
-}
+# Where a venue's code for an asset is not the canonical one. Empty, and the
+# module docstring is the story of why it was not: Kraken's `XBT`/`XDG` are
+# websocket **v1** spellings that reach this project only through REST
+# `AssetPairs.wsname`, and the v2 socket rejects them. Kept as a table rather
+# than deleted because the next venue may genuinely need one.
+_ALIASES: Final[dict[str, dict[str, str]]] = {}
 _CANONICAL: Final[dict[str, dict[str, str]]] = {
     venue: {code: base for base, code in aliases.items()}
     for venue, aliases in _ALIASES.items()

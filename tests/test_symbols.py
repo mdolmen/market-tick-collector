@@ -27,20 +27,25 @@ def test_native_round_trips_through_base_of(venue: str) -> None:
 
 
 def test_each_venue_spells_it_its_own_way() -> None:
-    # Kraken is the interesting one: it still uses the pre-ISO `XBT`, so the
-    # separator rule alone does not get there. This is the case that an
-    # intersection over base *keys* silently dropped instead of failing on.
+    # Bitcoin is the case that has been wrong twice. An intersection over base
+    # *keys* dropped it silently in Phase 2; the exception table added to fix
+    # that spelled it `XBT/USD`, which is Kraken's **v1** naming and which the
+    # v2 socket rejects outright. The separator rule alone is the whole rule.
     assert {v: native("BTC", v) for v in VENUES} == {
         "binance": "BTCUSDT",
         "coinbase": "BTC-USD",
-        "kraken": "XBT/USD",
+        "kraken": "BTC/USD",
     }
-    assert native("DOGE", "kraken") == "XDG/USD"
+    assert native("DOGE", "kraken") == "DOGE/USD"
 
 
-def test_an_aliased_code_maps_back_to_the_canonical_base() -> None:
-    assert base_of("XBT/USD", "kraken") == "BTC"
-    assert base_of("XDG/USD", "kraken") == "DOGE"
+def test_no_venue_needs_an_alias_and_the_table_still_works() -> None:
+    # The table is empty, so this asserts the machinery rather than an entry:
+    # an unaliased code has to round-trip, or removing the last alias would
+    # have quietly removed the mechanism with it.
+    assert base_of("BTC/USD", "kraken") == "BTC"
+    assert base_of("DOGE/USD", "kraken") == "DOGE"
+    assert native(base_of("SOL/USD", "kraken"), "kraken") == "SOL/USD"
 
 
 def test_binance_and_coinbase_btc_are_not_the_same_instrument() -> None:
@@ -55,7 +60,7 @@ def test_binance_and_coinbase_btc_are_not_the_same_instrument() -> None:
 def test_the_same_base_is_one_base_across_venues() -> None:
     # The overlap is on the base asset, which is the thing that genuinely is
     # shared — `NOTES.md` § *Venues and channels*.
-    assert base_of("BTCUSDT", "binance") == base_of("XBT/USD", "kraken") == "BTC"
+    assert base_of("BTCUSDT", "binance") == base_of("BTC/USD", "kraken") == "BTC"
 
 
 @pytest.mark.parametrize(
