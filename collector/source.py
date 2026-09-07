@@ -48,7 +48,7 @@ from data_pipeline_core import RunContext
 from websockets.sync.client import ClientConnection, connect
 
 from collector.adapters.base import Venue
-from collector.capture import CaptureRecord, Kind
+from collector.capture import CaptureRecord, Kind, decode
 
 # A refetch that keeps landing behind the buffer means something is wrong with
 # the venue or the clock, not with our patience. Fail the run rather than spin.
@@ -102,6 +102,11 @@ class FrameSource:
         self._first_seq_since_snapshot: int | None = None
         self._snapshot_seq: int | None = None
         self._skipped = False
+        # Which of the two checks in ``_track`` said so. Logged rather than
+        # acted on — the repair is the same either way — but a run that
+        # resubscribes needs to say whether the sequence or the venue's own
+        # checksum called it, because on some venues only one of them can.
+        self._skip_reason = ""
         self._refetches = 0
         self._resubscribes = 0
         self._last_snapshot_at = 0.0
@@ -181,9 +186,11 @@ class FrameSource:
             monotonic_ts = time.monotonic_ns()
             text = message if isinstance(message, str) else message.decode()
             # stdlib json on purpose: it is the baseline bench/decode.py
-            # measures the alternatives against. Only the ids are read — the
-            # record model is the transform's cost, not the capture worker's.
-            payload = json.loads(text)
+            # measures the alternatives against, and the only one of the three
+            # that can keep a venue's number as its source token at all. Only
+            # the ids are read here — the record model is the transform's cost,
+            # not the capture worker's.
+            payload = decode(text)
             kind = self._venue.classify(self._stream, payload)
             self._track(kind, payload)
             return self._record(
@@ -203,6 +210,7 @@ class FrameSource:
         shared and the branch is one line in ``fetch``.
         """
         if kind == "snapshot":
+            self._venue.observe(payload)
             self._snapshots += 1
             self._snapshot_seq = self._venue.snapshot_seq(payload)
             self._first_seq_since_snapshot = None
@@ -221,12 +229,22 @@ class FrameSource:
             self._prev_final_seq = self._venue.sequence_ids(payload)[1]
             return
         self._frames += 1
+        # Two ways one frame can tell this class the stream broke, and a venue
+        # normally has only one of them. The chain rule is the sequence's
+        # verdict; ``observe`` is the venue's own, and on a venue that numbers
+        # nothing it is the only one that ever fires — ``chains`` there is
+        # trivially true, so without this the source would never ask for a
+        # repair and the capture would carry no snapshot at the one point a
+        # replay needs one.
+        consistent = self._venue.observe(payload)
         first_seq, final_seq = self._venue.sequence_ids(payload)
         # Judged against the *previous* frame, so it has to happen before the
         # cursor moves.
-        self._skipped = self._prev_final_seq is not None and not self._venue.chains(
+        broke_chain = self._prev_final_seq is not None and not self._venue.chains(
             self._prev_final_seq, first_seq
         )
+        self._skipped = broke_chain or not consistent
+        self._skip_reason = "sequence" if broke_chain else "checksum"
         self._prev_final_seq = final_seq
         if self._first_seq_since_snapshot is None:
             self._first_seq_since_snapshot = first_seq
@@ -268,7 +286,9 @@ class FrameSource:
         # rather than for the whole run.
         self._refetches = 0
         if self._skipped:
-            ctx.logger.warning("socket skipped, fetching a snapshot")
+            ctx.logger.warning(
+                "stream broke, fetching a snapshot", reason=self._skip_reason
+            )
             return True
         return self._interval_elapsed()
 
