@@ -538,3 +538,131 @@ entirely — and the rule scored perfectly *because the one case that would have
 been excluded from the sample*. A validator whose sample is filtered by the thing it is
 validating always passes. The generator now matches on the symbol the rule produces, so an
 unmapped code fails loudly instead of vanishing.
+
+---
+
+## Phase 2.5 — Kraken
+
+The venue Phase 2 refused to ship. Its book messages carry no sequence of any kind, so an
+adapter without the CRC32 would answer `in_sequence` with `True` forever and let the book
+drift while staying plausible. Both landed together, as that refusal said they would have to.
+
+### What the probe settled
+
+`uv run python -m tools.probe kraken --duration 60 --land`, depth 1000, BTC/USD, 5129 book
+messages. The gate was one question — does recomputing the CRC32 from the raw JSON tokens
+reproduce the venue's own `checksum` field — and the answer was 5129 of 5129.
+
+| | |
+|---|---|
+| Checksum input | the source token, `.` and leading zeros removed |
+| Price / qty encoding | JSON numbers, **already at instrument precision** |
+| Depth options | 10 / 25 / 100 / 500 / 1000 — no full-depth channel |
+| Two depths, one connection | refused: `{"error":"Already subscribed"}` |
+| Sequence | none |
+| `timestamp` | on every book message, µs, strictly monotone and unique |
+| msg/s at depth 1000 | 95.7, against 7.1 at depth 10 in Phase 2 |
+
+Two of those cancelled planned work. Because the token is already padded to the instrument's
+precision, the CRC needs no `price_precision` table off the `instrument` channel — the whole
+second data artifact that had been budgeted for. And because no book message ever arrived
+with a bare integer where a decimal was expected, `parse_float=str` alone recovers every
+token; `parse_int` never comes into it.
+
+### The timestamp would have worked, and was rejected
+
+It is on snapshots and updates alike and was strictly monotone and unique across all 5129
+messages, so it would have served as the sequence and saved a counter. It is still a clock,
+and this project's own rules say to align by update id and never by clock, and that wall
+clocks step. A property that holds for sixty seconds is not a guarantee: two messages in one
+microsecond would silently discard one. So the ordering is a counter of our own, `chains`
+over it is trivially true, and the adapter says so in as many words. Sequencing is not
+evidence on this venue; the checksum is.
+
+### The checksum needs a book the reconstruction cannot provide
+
+`Book` is keyed by integer ticks and holds no strings. The CRC is computed over the top ten
+levels *as the venue spelled them*, so `Book` cannot serve that read at all — not slowly,
+not at all. The adapter keeps its own view instead, bounded by the subscribed depth.
+
+That inverts what `NOTES.md` § *Book representation* expected. Its `dict` verdict was made
+conditional on a checksum venue turning the ordered top-N read into a per-frame cost, and the
+per-frame cost is real — it simply lands somewhere else, and `Book` never sees it. Phase 6
+benchmarks the same read:write ratio it always faced.
+
+Where it does land, from `bench/checksum.py` over the 5129-message session:
+
+| implementation | µs / message |
+|---|---|
+| sort the side, per message | 73.9 |
+| integer keys, token cached per level | 26.0 |
+| rebuilt only when a write could move it | **8.5** |
+
+The median message touches **one** level, and only 18.5% of sides needed a rebuild at all —
+so the top ten is cached with the price that bounds it and most messages skip the work.
+The last row times the whole of `observe`, level construction included, which the other two
+do not do. Its correctness is checked against the naive recomputation on every message of a
+landed session, because an 8.7x optimisation that is right for a thousand messages and then
+is not is worse than no optimisation.
+
+The venue also does not delete every level that leaves its depth window: the book grew from
+1000 to 1040 levels a side in sixty seconds while every checksum still matched. The view is
+trimmed to bound that. A memory bound, not a correctness one — the CRC reads ten levels.
+
+### Three bugs, and none of them was the checksum
+
+The CRC was the part that worked first. What cost the time was everything around it.
+
+**`XBT/USD` is a protocol nobody here speaks.** The first live run connected, subscribed,
+received nothing and exited **zero**. `collector/symbols.py` committed `XBT` for bitcoin and
+`XDG` for dogecoin — an exception table added in Phase 2 — and the v2 socket answers
+`{"error":"Currency pair not supported XBT/USD","success":false}`. Those spellings come from
+REST `AssetPairs.wsname`, which `tools/symbols.py` described as "the spelling the websocket
+API accepts". It is **v1** naming. The v2 socket uses ISO codes throughout and its own
+`instrument` channel lists all 188 committed bases under them, `XBT` and `XDG` appearing in
+neither. So the mapping is a rule with no exceptions after all, exactly as the generator kept
+claiming while reading the wrong list — and Phase 2's write-up, which called those exceptions
+the useful part of that section, was describing a fix to the wrong layer.
+
+**A rejected subscription is silent.** That run *passed*. The ack is `success: false` on a
+socket that stays open, and every stage after the source tolerates a quiet stream, so the
+worker logged `frames: 0` and returned success. The guard is venue-neutral because the ack
+is not: no book message at all in the whole window is the one symptom a rejected subscription
+has on any venue, and no working subscription produces it — even an illiquid symbol gets the
+in-band snapshot.
+
+**A snapshot at a healthy book is not always redundant.** This is the one worth having found.
+`BookTransform` ignored a snapshot arriving at a live book: rebuilding would cost a full
+book's worth of rows to arrive where the book already is. That reasoning holds for a snapshot
+read *alongside* a stream that never stopped — Binance's REST call — and fails for one
+obtained by unsubscribing and resubscribing, which is the only way either in-band venue will
+send one. Levels deleted during that gap are absent from the new snapshot and never arrive as
+deletes. No gap, no sequence break, and no failing checksum for as long as the staleness sits
+below the top ten.
+
+It surfaced as **43 crossed books in a 60-second replay in which all 6572 checksums passed** —
+the book was wrong in exactly the region the CRC does not cover, which is as close to the
+worst failure mode in this repo's vocabulary as it gets. Diagnosing it took locating the first
+crossed record (2335) against the snapshot positions (3, 917, 2841): the corruption began
+after the first resubscribe, not after a gap.
+
+It applies to **Coinbase identically** and had been there since Phase 2. Nothing caught it
+because `snapshot_interval_s` defaults to 300 and no test run lasted that long. Two Coinbase
+tests asserted `bootstraps == 1` over a session containing six snapshots — they were encoding
+the bug. The fix is one question on the adapter, `snapshot_supersedes`, answered False by
+Binance and True by both in-band venues.
+
+### Verification
+
+45s live collect, depth 1000: 3271 frames at 72.7/s, 0 gaps, 0 crossed books, live at exit,
+best bid/ask 79528.7 / 79528.8. Every checksum validated.
+
+Cold replay of the capture that produced the 43 crossings: **0 crossed**, 11 bootstraps, live
+at exit.
+
+Fault replay, drop + reorder, seed 3: 10 gaps, 11 bootstraps, 0 crossed books, and it ends
+**untrusted** — correctly. The last gap lands at record 5060 and the last snapshot at 5024,
+so nothing in the recording can repair it. That is `_interval_elapsed`'s documented
+limitation rather than a convergence failure: an injected fault removes frames from a
+recording but cannot conjure the repair snapshot a live source would have fetched. On the
+live path the source resubscribes on the failing checksum itself, within one message.

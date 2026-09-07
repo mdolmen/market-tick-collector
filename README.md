@@ -15,15 +15,22 @@ socket drives.
 
 The venue now sits behind a `VenueAdapter` protocol: the book, the sink and the fault
 injector are handed normalized records and cannot tell which venue produced them.
-`tests/test_boundary.py` asserts that statically rather than trusting it. The two venues span
-two different sequencing dialects — Binance chains overlapping `[U, u]` ranges and bootstraps
-from an out-of-band REST snapshot, Coinbase chains a single per-connection `sequence_num` and
-sends its snapshot in band — which is what makes the boundary load-bearing rather than
-decorative.
+`tests/test_boundary.py` asserts that statically rather than trusting it. The three venues
+span three different sequencing dialects — Binance chains overlapping `[U, u]` ranges and
+bootstraps from an out-of-band REST snapshot, Coinbase chains a single per-connection
+`sequence_num` and sends its snapshot in band, and Kraken numbers *nothing* — which is what
+makes the boundary load-bearing rather than decorative.
 
-Kraken is deferred to its own phase: its book channel carries no sequence number at all, so
-its CRC32 checksum is not a supplementary check but its *only* gap detection, and the adapter
-cannot ship before it. `DEVELOPMENT.md` § Phase 2 has the channel survey behind that call.
+Kraken is the one that made the contract earn its keep. It carries no sequence of any kind,
+so the chain rule is trivially true and proves nothing, and a CRC32 over the venue's own top
+ten is the only integrity signal there is — which is why the adapter and the checksum shipped
+in one commit. It costs 8.5µs a message at depth 1000, against 73.9µs done the obvious way
+(`bench/checksum.py`).
+
+Adding it found a bug in the two venues already shipped: a snapshot at a healthy book was
+ignored as redundant, which holds for Binance's REST read and not for one obtained by
+resubscribing. 43 crossed books in a replay whose every checksum passed. `DEVELOPMENT.md`
+§ Phase 2.5.
 
 Two numbers, and they are never merged:
 

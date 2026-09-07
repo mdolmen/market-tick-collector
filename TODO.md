@@ -60,14 +60,14 @@ is a legal `Source` and `WorkerApp` ran it untouched, so Phase 0 needed **zero**
 
 ## Phase 2.5 · Kraken
 
-- [ ] Kraken adapter: in-band snapshot, one depth per symbol
-- [ ] CRC32 over the top 10, validated inline, latching `snapshot_required` on mismatch
-- [ ] Decode with `parse_float=str` — Kraken quotes price and qty as JSON numbers, and the
-      token is what the checksum is computed over
-- [ ] Re-run the Phase 6 book benchmark with the checksum in the loop: it makes the ordered
-      top-N read per-frame, which is the read a plain `dict` is worst at
-- [ ] Confirm whether a depth-limited channel can run alongside full depth per symbol;
-      if not, Phase 8's Oracle 2 does not exist for this venue and the CRC is its oracle
+- [x] Kraken adapter: in-band snapshot, one depth per symbol
+- [x] CRC32 over the top 10, validated inline, latching `snapshot_required` on mismatch
+- [x] Decode with `parse_float=str` — and for every venue, not just this one: `scaled_int` refuses `1e-08`, so a float kills the run rather than drifting
+- [x] The token is already at the instrument's precision; no `price_precision` table needed
+- [x] No full-depth channel exists — depth is 10/25/100/500/1000. Running the 1000 ceiling
+- [x] Trim the checksum view: the venue leaves levels behind, 1000 → 1040 a side in 60s
+- [x] A second depth per symbol is refused — Phase 8's Oracle 2 does not exist here
+- [ ] ~~Re-run the Phase 6 book benchmark with the checksum in the loop~~ — premise wrong. The CRC reads the venue's decimal strings and `Book` has none, so it never touches that structure. See Phase 6 and `bench/checksum.py`
 
 ## Phase 3 · Connection supervision & sharding
 
@@ -117,6 +117,8 @@ is a legal `Source` and `WorkerApp` ran it untouched, so Phase 0 needed **zero**
 - [ ] One book per `(venue, symbol)`, a `dict` keyed by price (decided)
 - [ ] Benchmark it against sorted-array and ticks-from-mid at a realistic read:write ratio
 - [ ] Measure the hot read — best bid/ask — not just diff application
+- [ ] The checksum stays out of it: it reads decimal strings, `Book` holds ticks. Kraken's
+      per-frame ordered read is on the adapter's own view, already measured
 - [ ] Bootstrap splice: buffer first, snapshot second, find the event straddling `lastUpdateId`
 - [ ] Distinguish snapshot-too-old (refetch) from buffer-behind (keep waiting)
 - [ ] Sizes are absolute set-to-value, never increments; zero is the only deletion signal
@@ -142,11 +144,14 @@ is a legal `Source` and `WorkerApp` ran it untouched, so Phase 0 needed **zero**
 
 - [ ] Oracle 1: reconstructed book vs venue REST snapshot, periodic
 - [ ] Oracle 2: venue's own depth-limited top-N, continuous, on audited symbols
+- [ ] Not on Kraken: a second depth per symbol is refused on one connection. A second
+      connection might carry it — that is Phase 3's call
 - [ ] Align oracle 2 by update id, never by clock; keep a ring of recent top-N versions
 - [ ] Compare the top N−1 levels to avoid the truncation boundary artifact
 - [ ] Oracle 3: replay harness injected faults; target detection of 100%
 - [ ] Kraken CRC32 as a fourth, venue-native check — built in Phase 2.5, not here, because
       it is that venue's only gap detection rather than an extra oracle
+- [ ] It already runs per message; this phase counts and reports its breaks
 - [ ] Break classification: missing, duplicate, value mismatch, timing
 - [ ] Configurable tolerance rules, break report, idempotent re-run
 - [ ] Report every oracle's break count separately, never merged into one number
@@ -161,6 +166,8 @@ is a legal `Source` and `WorkerApp` ran it untouched, so Phase 0 needed **zero**
 - [ ] Flamegraph before and after one profiling-driven optimisation
 - [ ] Bounded cache over `scaled_int` — 6.2x in Phase 0, but distinct sizes grow linearly,
       so it needs a size bound and an eviction policy sized against a long capture
+- [ ] Kraken parses its levels twice per frame in the transform — `observe` and
+      `parse_frame`. Left for a profile rather than a guess
 
 ## Phase 10 · Read layer
 
