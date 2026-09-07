@@ -194,6 +194,10 @@ class BinanceAdapter:
         """The venue publishes no checksum, so `chains` is the whole of it."""
         return True
 
+    def snapshot_supersedes(self) -> bool:
+        """No: the REST snapshot is read alongside a socket that never stopped."""
+        return False
+
     def in_sequence(self, update: Update) -> bool:
         """`U == prev_u + 1`. Ranges chain; single sequence numbers do not."""
         if self._prev_final_id is None:

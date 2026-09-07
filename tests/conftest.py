@@ -286,7 +286,7 @@ def _kr_time(index: int) -> str:
     return f"2026-09-07T08:{minutes:02d}:{seconds:02d}.123456Z"
 
 
-class _KrakenSession:
+class KrakenSession:
     """A consistent Kraken session: a book, and the checksums it implies."""
 
     def __init__(self) -> None:
@@ -367,7 +367,7 @@ def kraken_capture(*, count: int, snapshot_every: int = 0) -> list[CaptureRecord
     if snapshot_every > 0:
         positions |= set(range(snapshot_every, count, snapshot_every))
 
-    session = _KrakenSession()
+    session = KrakenSession()
     records: list[CaptureRecord] = []
 
     def append(kind: Kind, payload: dict[str, Any]) -> None:

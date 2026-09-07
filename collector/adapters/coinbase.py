@@ -259,3 +259,13 @@ class CoinbaseAdapter:
     def observe(self, payload: Mapping[str, Any]) -> bool:
         """The venue publishes no checksum, so `chains` is the whole of it."""
         return True
+
+    def snapshot_supersedes(self) -> bool:
+        """Yes: a snapshot only ever arrives because `resubscribe_frames` asked.
+
+        The unsubscribe/subscribe pair keeps the *sequence* unbroken — measured
+        in Phase 2 — which is exactly what makes ignoring the snapshot unsafe:
+        a level deleted while unsubscribed is absent from the new snapshot and
+        never arrives as a delete, so nothing in the sequence marks the loss.
+        """
+        return True

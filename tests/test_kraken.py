@@ -29,7 +29,7 @@ from collector.capture import CaptureRecord, payload_of
 from collector.model import LevelRow
 from collector.replay import FaultConfig, FaultInjector
 from collector.transform import BookTransform
-from tests.conftest import kraken_capture
+from tests.conftest import KrakenSession, kraken_capture
 
 _FIXTURES = Path(__file__).parent / "fixtures"
 _FRAMES = 60
@@ -302,6 +302,62 @@ def test_the_view_is_trimmed_without_disturbing_the_top() -> None:
     # Still consistent with the venue after the whole session, which is the
     # only statement worth making about a trim.
     assert not adapter.snapshot_required()
+
+
+def test_a_resubscribe_snapshot_rebuilds_rather_than_being_ignored() -> None:
+    """The worst bug this phase found, and it was not Kraken's.
+
+    A snapshot arriving at a *healthy* book used to be ignored: it was taken
+    to be a redundant read of a stream that never stopped. On an in-band venue
+    it is not — the snapshot exists because `resubscribe_frames` asked for it,
+    and the unsubscribe/subscribe pair stopped the diffs. Levels deleted in
+    that gap are absent from the new snapshot and never sent as deletes, so
+    the book keeps them forever.
+
+    Nothing catches it. There is no gap, no sequence break, and no failing
+    checksum for as long as the stale levels sit below the top ten — which is
+    what makes it the failure mode `NOTES.md` § *Steady state* names as the
+    worst available. It surfaced as 43 crossed books in a 60s replay in which
+    every one of 6572 checksums passed.
+    """
+    session = KrakenSession()
+    records: list[CaptureRecord] = []
+
+    def add(kind: str, payload: dict[str, Any]) -> None:
+        records.append(
+            CaptureRecord(
+                stream=_STREAM,
+                kind=cast(Any, kind),
+                seq=len(records) + 1,
+                receive_ts=len(records),
+                monotonic_ts=len(records),
+                payload=json.dumps(payload),
+            )
+        )
+
+    add("snapshot", session.snapshot(0))
+    for index in range(1, 6):
+        add("frame", session.update(index))
+
+    # The resubscribe: the venue's book moves on while we are unsubscribed, and
+    # the levels it dropped are never mentioned again. Modelled by deleting the
+    # whole bid side out from under the stream and re-snapshotting.
+    for ticks in list(session.bids):
+        if ticks != max(session.bids):
+            del session.bids[ticks]
+    add("snapshot", session.snapshot(6))
+    for index in range(7, 12):
+        add("frame", session.update(index))
+
+    _, transform = _run(records)
+
+    # The book must hold what the venue holds — not the levels it dropped
+    # while we were not listening.
+    assert transform.bootstraps == 2, "the second snapshot must rebuild"
+    assert len(transform.book.bids) == len(session.bids)
+    assert transform.gaps == 0
+    assert transform.crossed == 0
+    assert transform.live
 
 
 def test_a_shallow_book_still_checksums() -> None:

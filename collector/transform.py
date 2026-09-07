@@ -124,6 +124,19 @@ class BookTransform:
         When the book *is* untrusted the buffer is deliberately not cleared:
         ``bootstrap`` discards whatever is entirely in the past by itself, and a
         frame straddling the new snapshot is exactly what it is looking for.
+
+        **Which snapshots may be ignored is the venue's answer, not ours.**
+        The paragraph above holds only where a snapshot is a read taken
+        alongside a diff stream that never stopped. Where the only way to get
+        one is to unsubscribe and subscribe, that read *interrupted* the
+        stream, and every level deleted during the gap is absent from the new
+        snapshot without ever arriving as a delete. Ignoring such a snapshot
+        leaves those levels in the book forever — no gap, no sequence break,
+        no failing checksum while the staleness sits below the top ten. It was
+        found in Phase 2.5 as 43 crossed books in a 60-second Kraken replay
+        whose every checksum passed, and it applies to Coinbase identically;
+        it had simply never been exercised, because the snapshot interval
+        defaults to 300s and no test run lasted that long.
         """
         payload = payload_of(record)
         self._snapshot = self._adapter.parse_snapshot(
@@ -137,7 +150,12 @@ class BookTransform:
         # same thing again.
         self._adapter.advance(payload)
         if self._live:
-            return
+            if not self._adapter.snapshot_supersedes():
+                return
+            # Re-bootstrap from it. The buffer goes because it describes a
+            # stream this snapshot has replaced, not one it continues.
+            self._live = False
+            self._buffered = []
         yield from self._try_bootstrap(ctx)
 
     def _on_frame(self, record: CaptureRecord, ctx: RunContext) -> Iterator[LevelRow]:

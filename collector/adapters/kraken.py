@@ -421,6 +421,19 @@ class KrakenAdapter:
         """The shared sequence walk, over the counter `observe` assigns."""
         return bootstrap_by_sequence(self, buffered, snapshot)
 
+    def snapshot_supersedes(self) -> bool:
+        """Yes, and here it is not even subtle: the book is depth-limited.
+
+        A snapshot only arrives because `resubscribe_frames` asked, and the
+        unsubscribe/subscribe pair interrupts the diff stream. Everything that
+        left the top-1000 window in that gap is absent from the new snapshot
+        and is never sent as a delete — and with no sequence at all, nothing
+        marks the loss. The checksum would not catch it either while the
+        staleness sits below the top ten, which is exactly how it stays
+        plausible.
+        """
+        return True
+
     def bootstrapped(self, snapshot: Snapshot) -> None:
         """The cursor is the snapshot's own position in the arrival order."""
         self._prev_seq = snapshot.final_seq

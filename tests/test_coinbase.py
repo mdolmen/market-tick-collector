@@ -96,19 +96,33 @@ def test_an_ack_advances_the_cursor_so_the_next_frame_is_not_a_gap() -> None:
     rows, transform = _run(_session())
 
     assert transform.gaps == 0
-    assert transform.bootstraps == 1
     assert transform.live
     assert [row for row in rows if row["action"] == "gap"] == []
 
 
-def test_a_healthy_book_still_advances_over_an_in_band_snapshot() -> None:
-    """A snapshot at a live book is ignored for rows but not for sequencing —
-    it holds a sequence number, and skipping it strands the next frame."""
+def test_a_healthy_book_rebuilds_from_an_in_band_snapshot() -> None:
+    """Not ignored — and this assertion is the other way round than it was.
+
+    It read `bootstraps == 1`: a snapshot at a live book was taken to be
+    redundant, worth advancing the cursor over and nothing more. That is true
+    of a snapshot read *alongside* an uninterrupted stream, which is Binance's
+    REST call and is not this. Here the only way to obtain one is
+    `resubscribe_frames`, and the unsubscribe/subscribe pair stops the diffs:
+    any level deleted in that gap is missing from the new snapshot and never
+    arrives as a delete. The sequence stays unbroken across the pair — measured
+    in Phase 2 — so nothing marks the loss and the book stays plausible.
+
+    Phase 2.5 found it on Kraken as 43 crossed books in a replay whose every
+    checksum passed. It was here the whole time and no run was long enough to
+    show it: the snapshot interval defaults to 300s.
+    """
     _, transform = _run(_session())
 
-    # Six snapshots land in a 60-frame session, five of them at a healthy book.
-    assert transform.bootstraps == 1
+    # Six snapshots land in a 60-frame session, and every one of them rebuilds.
+    assert transform.bootstraps == 6
     assert transform.gaps == 0
+    assert transform.live
+    assert transform.crossed == 0
 
 
 def test_a_lost_ack_is_detected_like_any_other_lost_message() -> None:

@@ -261,6 +261,26 @@ class VenueAdapter(Protocol):
         """
         ...
 
+    def snapshot_supersedes(self) -> bool:
+        """Does a snapshot from this venue *replace* the book, or describe it?
+
+        False where a snapshot is a read taken alongside a diff stream that
+        never stopped — Binance's REST depth call, which costs the socket
+        nothing. Such a snapshot at a healthy book is redundant, and rebuilding
+        from it would emit a full book's worth of rows to arrive exactly where
+        the book already is.
+
+        True where the *only* way to obtain one is to ask the venue, and asking
+        means unsubscribe then subscribe — which interrupts the diff stream.
+        A level deleted while unsubscribed is simply absent from the new
+        snapshot; the venue never sends a delete for it, and no sequence is
+        skipped, so a book that keeps its old state stays plausible and is
+        wrong. That is the failure `NOTES.md` § *Steady state* calls the worst
+        available, and it is why this question exists rather than the transform
+        assuming either answer.
+        """
+        ...
+
     def bootstrapped(self, snapshot: Snapshot) -> None:
         """A snapshot has been applied; set the sequence cursor from it.
 
