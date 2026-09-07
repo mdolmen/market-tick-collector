@@ -18,9 +18,16 @@ them is allowed to see the venue's I/O:
 **The sequencing dialect is the one honest exception** (`NOTES.md`
 § *Sequencing dialects*). Binance chains overlapping `[U, u]` ranges and
 bootstraps from an out-of-band REST snapshot; Coinbase chains a single
-`sequence_num` and sends its snapshot in band. Both answer `in_sequence` /
+`sequence_num` and sends its snapshot in band; Kraken numbers *nothing* and
+publishes a CRC32 over its own top 10 instead. All three answer `in_sequence` /
 `gap_detected` / `snapshot_required`, and that uniformity is the whole of what
 downstream is allowed to see.
+
+The third row is what made the contract earn its keep. Two venues that both
+prove continuity from a sequence can share one shape by accident; a venue where
+the chain rule is *trivially true and proves nothing* cannot. It is why
+`observe` exists, and why `snapshot_required` is a latch asked separately from
+`gap_detected` rather than a return value of it.
 """
 
 from __future__ import annotations
@@ -200,6 +207,39 @@ class VenueAdapter(Protocol):
         patience, and collapsing them gives a bootstrap loop that occasionally
         spins. Both venues so far delegate to `bootstrap_by_sequence`; it stays
         a protocol member because a checksum venue would not.
+        """
+        ...
+
+    def observe(self, payload: Mapping[str, Any]) -> bool:
+        """The venue's own integrity check over the book after this message.
+
+        True when it passed, and true unconditionally on a venue that
+        publishes no such check — which is both of the first two dialect rows:
+        they prove continuity from the sequence alone, and the sequence is
+        already in `chains`.
+
+        False is returned **once, on the message that broke it**, not for the
+        whole untrusted interval — the same distinction `gap_detected` and
+        `snapshot_required` already draw, and for the same reason. A caller
+        that acted on it every message would ask for a repair again before the
+        first one could arrive.
+
+        The third row has no sequence to prove anything with. Kraken numbers
+        nothing and instead publishes a CRC32 over its own top 10 on every
+        message, so the only way to know the book is still right is to keep an
+        ordered view of the top levels, apply the message to it, and recompute.
+        That is what a checksum venue does here, latching `snapshot_required`
+        when the two disagree.
+
+        **Called once per book message, in arrival order, by both drivers.**
+        The capture source calls it to decide whether to ask for a repair; the
+        transform calls it to decide whether the book is still trustworthy —
+        the same two questions over one venue rule that `chains` already
+        serves, and the reason each of them holds its own adapter instance.
+
+        It is also why `snapshot_required` is a separate question from
+        `gap_detected`: this can fail with the message sequence intact, and on
+        a venue with no sequence it is the *only* thing that can fail.
         """
         ...
 

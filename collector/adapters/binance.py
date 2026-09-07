@@ -190,6 +190,10 @@ class BinanceAdapter:
     def advance(self, payload: Mapping[str, Any]) -> None:
         """No-op: no control traffic, and the REST snapshot is outside the chain."""
 
+    def observe(self, payload: Mapping[str, Any]) -> bool:
+        """The venue publishes no checksum, so `chains` is the whole of it."""
+        return True
+
     def in_sequence(self, update: Update) -> bool:
         """`U == prev_u + 1`. Ranges chain; single sequence numbers do not."""
         if self._prev_final_id is None:

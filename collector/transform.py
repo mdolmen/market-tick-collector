@@ -95,7 +95,14 @@ class BookTransform:
         """
         if record["kind"] == "control":
             self._adapter.advance(payload_of(record))
-        elif record["kind"] == "snapshot":
+            return
+        # Every book message, in arrival order, before anything is decided
+        # about it. On a venue that publishes an integrity token this is where
+        # it is checked, and on a venue with no sequence it is the only thing
+        # that can tell the book it has gone wrong — so it must run whether the
+        # book is live, buffering or already untrusted.
+        self._adapter.observe(payload_of(record))
+        if record["kind"] == "snapshot":
             yield from self._on_snapshot(record, ctx)
         else:
             yield from self._on_frame(record, ctx)

@@ -255,3 +255,7 @@ class CoinbaseAdapter:
     def advance(self, payload: Mapping[str, Any]) -> None:
         """Acks and snapshots are numbered too, so they move the cursor."""
         self._prev_seq = int(payload["sequence_num"])
+
+    def observe(self, payload: Mapping[str, Any]) -> bool:
+        """The venue publishes no checksum, so `chains` is the whole of it."""
+        return True
