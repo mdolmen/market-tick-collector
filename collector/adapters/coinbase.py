@@ -139,6 +139,18 @@ class CoinbaseAdapter:
             return "control"
         return "snapshot" if self._event(payload)["type"] == "snapshot" else "frame"
 
+    def stream_of(self, payload: Mapping[str, Any]) -> str | None:
+        """From the event's `product_id`; `None` for anything off the book channel.
+
+        Reads the first event rather than going through `_event`, which is the
+        guard and not a reader: routing has to work on a message this adapter
+        is about to reject, so that the rejection names the stream it came from.
+        """
+        if payload.get("channel") != _BOOK_CHANNEL:
+            return None
+        events = payload["events"]
+        return self.stream_tag(str(events[0]["product_id"])) if events else None
+
     def sequence_ids(self, payload: Mapping[str, Any]) -> tuple[int, int]:
         """One number per message, so the range is a point."""
         sequence = int(payload["sequence_num"])

@@ -292,6 +292,17 @@ class KrakenAdapter:
             return "control"
         return "snapshot" if payload["type"] == "snapshot" else "frame"
 
+    def stream_of(self, payload: Mapping[str, Any]) -> str | None:
+        """From the entry's `symbol`; `None` off the book channel.
+
+        Reads `data[0]` rather than going through `_entry`, for the reason the
+        Coinbase one does: routing must survive a message the guard rejects.
+        """
+        if payload.get("channel") != _CHANNEL:
+            return None
+        data = payload["data"]
+        return self.stream_tag(str(data[0]["symbol"])) if data else None
+
     def sequence_ids(self, payload: Mapping[str, Any]) -> tuple[int, int]:
         """The counter as it stands. A read, never a write — see `observe`."""
         return self._seq, self._seq

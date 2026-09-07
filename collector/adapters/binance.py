@@ -112,6 +112,15 @@ class BinanceAdapter:
         """
         return "snapshot" if stream == REST_DEPTH_STREAM else "frame"
 
+    def stream_of(self, payload: Mapping[str, Any]) -> str | None:
+        """From `s`, the symbol the venue stamps on every `depthUpdate`.
+
+        `None` covers the subscribe ack — `{"result":null,"id":1}` — which the
+        URL-path subscription never produced and a `SUBSCRIBE` frame does.
+        """
+        symbol = payload.get("s")
+        return None if symbol is None else self.stream_tag(str(symbol))
+
     def sequence_ids(self, payload: Mapping[str, Any]) -> tuple[int, int]:
         return int(payload["U"]), int(payload["u"])
 

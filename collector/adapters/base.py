@@ -139,6 +139,27 @@ class VenueAdapter(Protocol):
         """
         ...
 
+    def stream_of(self, payload: Mapping[str, Any]) -> str | None:
+        """The `stream` tag this message belongs to, or `None` for the connection.
+
+        The demultiplexer for a socket carrying many symbols, and the reason
+        `capture.py` reserved `stream` in Phase 1 rather than adding a field
+        later. `None` means the message is about the connection rather than any
+        one symbol — a subscription ack, a heartbeat, a status frame — and it
+        is the source's job to give those a tag of their own.
+
+        It returns the *tag*, not the symbol, because `record["stream"]` is what
+        every downstream demux reads. Returning a symbol would make the hot path
+        `stream_tag(stream_of(payload))`, which is two calls and two concepts
+        where one will do. `stream_tag` still exists for the other direction:
+        building the tag from a symbol we already hold.
+
+        Cheap on purpose, like `sequence_ids` and for the same reason — the
+        capture source calls it on every message and must not pay for the
+        record model to route one.
+        """
+        ...
+
     def sequence_ids(self, payload: Mapping[str, Any]) -> tuple[int, int]:
         """`(first, final)` out of a raw payload, without building the model.
 
