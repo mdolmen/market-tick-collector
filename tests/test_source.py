@@ -96,6 +96,24 @@ def _run(
     return list(source.fetch(ctx)), http
 
 
+class _QuietVenue(BinanceAdapter):
+    """An in-band venue whose every message is control — a rejected ack.
+
+    Subclassed rather than written out because the guard under test is
+    venue-neutral: what matters is that nothing classifies as a book message,
+    not which venue failed to send one.
+    """
+
+    def classify(self, stream: str, payload: Any) -> Any:
+        return "control"
+
+    def snapshot_request(self, symbol: str) -> Any:
+        return None
+
+    def sequence_ids(self, payload: Any) -> tuple[int, int]:
+        return 0, 0
+
+
 def _kinds(records: list[CaptureRecord]) -> list[str]:
     return [record["kind"] for record in records]
 
@@ -171,3 +189,29 @@ def test_a_clean_session_never_refetches(
 ) -> None:
     _, http = _run(monkeypatch, frames, [snapshot_payload])
     assert http.calls == 1
+
+
+def test_a_rejected_subscription_fails_the_run_instead_of_going_quiet(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Phase 2.5 failure, as an assertion.
+
+    Kraken was subscribed to `XBT/USD` — the spelling `collector/symbols.py`
+    had committed — and answered `success: false` on a socket that stayed open
+    and silent. The run connected, landed the ack, reported `frames: 0` and
+    exited zero. A capture with no book message in it is not a quiet market,
+    it is a broken subscription, and it has to say so.
+    """
+    socket = _FakeSocket([json.dumps({"result": {}, "error": "nope"})])
+    monkeypatch.setattr(
+        source_module, "connect", lambda *args, **kwargs: socket, raising=True
+    )
+    ctx = RunContext.create(source_name="test", http=cast(HttpClient, _FakeHttp([])))
+    source = FrameSource(
+        venue=_QuietVenue(),
+        symbol="XBT/USD",
+        duration_s=0.2,
+    )
+
+    with pytest.raises(RuntimeError, match="no book message"):
+        list(source.fetch(ctx))

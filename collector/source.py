@@ -146,6 +146,35 @@ class FrameSource:
                 else:
                     self._resubscribe(ws, ctx)
             self._report(ctx, time.monotonic() - started)
+            self._assert_the_subscription_took()
+
+    def _assert_the_subscription_took(self) -> None:
+        """A run that received no book message at all did not run.
+
+        Venue-neutral on purpose, because the way this goes wrong is not.
+        Phase 2.5 subscribed Kraken to ``XBT/USD`` — the spelling
+        ``collector/symbols.py`` had committed — and the venue answered
+        ``{"error":"Currency pair not supported","success":false}`` on a socket
+        that then stayed open and silent. The run connected, landed two control
+        records, reported ``frames: 0`` and exited **zero**. Nothing in the
+        pipeline objected, because every stage after this one is built to
+        tolerate a quiet stream.
+
+        A rejected subscription looks different on every venue and is a
+        different shape again on each, so matching the ack would be three
+        venue-specific parsers. Not receiving a single book message in the
+        whole window is the one symptom they share, and it is not something a
+        working subscription does — even an illiquid symbol gets the in-band
+        snapshot, and an out-of-band venue gets the REST one.
+        """
+        if self._frames or self._snapshots:
+            return
+        raise RuntimeError(
+            f"no book message on {self._stream!r} in {self._duration_s:.0f}s "
+            f"({self._control} control record(s)) — the subscription was "
+            f"almost certainly rejected; check the venue's spelling of "
+            f"{self.symbol!r}"
+        )
 
     def _resubscribe(self, ws: ClientConnection, ctx: RunContext) -> None:
         """Ask an in-band venue for a fresh snapshot, and land nothing yet."""
