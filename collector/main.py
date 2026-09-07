@@ -21,9 +21,10 @@ adapter and ``WorkerApp``'s one-source contract stays untouched.
 
 Key knobs:
 
-    MTC_VENUE            binance | coinbase              (binance)
+    MTC_VENUE            binance | coinbase | kraken     (binance)
     MTC_SYMBOL           one symbol, venue-native form   (BTCUSDT)
     MTC_DURATION_S       how long a bounded live run lasts (60)
+    MTC_DEPTH            Kraken book depth, 10..1000     (1000)
     MTC_OUTPUT           parquet | console               (parquet)
     MTC_RAW_CHANNEL      capture/replay channel name     (<venue>-depth)
     MTC_RAW_BUCKET_URL   where it lands (else RAW_BUCKET_URL)

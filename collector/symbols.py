@@ -59,8 +59,8 @@ _CANONICAL: Final[dict[str, dict[str, str]]] = {
 }
 
 # Base assets quoted against the venue's USD-ish asset on all three venues.
-# Kraken is not adapted yet (see `TODO.md` Phase 2.5); it is in the
-# intersection anyway so that the set does not move when it lands.
+# Kraken was in the intersection before it was adapted, so that the set did not
+# move when Phase 2.5 landed it. It did not.
 OVERLAPPING_BASES: Final[tuple[str, ...]] = (
     "1INCH",
     "2Z",

@@ -9,6 +9,7 @@ records*, so building those is here rather than copied into three test modules.
 from __future__ import annotations
 
 import json
+import zlib
 from pathlib import Path
 from typing import Any, cast
 
@@ -244,4 +245,147 @@ def coinbase_capture(
         if index == ack_before:
             append("control", coinbase_control(sequence))
         append("frame", coinbase_frame(sequence, index))
+    return records
+
+
+# --- Kraken ----------------------------------------------------------------
+#
+# The third dialect, and the builders have to work harder than either of the
+# other two for one reason: **there is no sequence to fake**. A Binance or
+# Coinbase session is made consistent by numbering it correctly; a Kraken
+# session is made consistent by *computing the venue's checksum*, because that
+# is the only thing an adapter here can check. A builder that wrote an
+# arbitrary `checksum` would produce a session the adapter rejects on message
+# one, and the fault battery over it would prove nothing.
+#
+# So these keep a small book of their own and emit the CRC32 the venue would
+# have sent. That makes them the one fixture builder in this file that
+# duplicates logic under test — deliberately, and by a different route: the
+# adapter maintains an incremental top-10 window, this recomputes from scratch.
+# `test_kraken.py` also checks both against a landed live session, which is the
+# only thing that proves either of them right.
+
+_KR_SYMBOL = "BTC/USD"
+_KR_STREAM = f"book:{_KR_SYMBOL}"
+_KR_BID = 79_450_00000000
+_KR_TICK = 10000000  # 0.1, the venue's price precision for this pair
+_KR_LEVELS = 12  # more than the checksum's ten, so the window can move
+
+
+def _kr_price(ticks: int) -> str:
+    """Ticks to the venue's own spelling: one decimal place for this pair."""
+    return f"{ticks / 10**8:.1f}"
+
+
+def _kr_qty(units: int) -> str:
+    return f"{units / 10**8:.8f}"
+
+
+def _kr_time(index: int) -> str:
+    minutes, seconds = divmod(index, 60)
+    return f"2026-09-07T08:{minutes:02d}:{seconds:02d}.123456Z"
+
+
+class _KrakenSession:
+    """A consistent Kraken session: a book, and the checksums it implies."""
+
+    def __init__(self) -> None:
+        self.bids: dict[int, str] = {}
+        self.asks: dict[int, str] = {}
+        for depth in range(_KR_LEVELS):
+            self.bids[_KR_BID - depth * _KR_TICK] = _kr_qty(100000 + depth)
+            self.asks[_KR_BID + (depth + 1) * _KR_TICK] = _kr_qty(200000 + depth)
+
+    def checksum(self) -> int:
+        """Asks best-first then bids best-first, ten a side — recomputed whole."""
+        parts: list[str] = []
+        for ticks in sorted(self.asks)[:10]:
+            parts.append(_kr_token(_kr_price(ticks)) + _kr_token(self.asks[ticks]))
+        for ticks in sorted(self.bids, reverse=True)[:10]:
+            parts.append(_kr_token(_kr_price(ticks)) + _kr_token(self.bids[ticks]))
+        return zlib.crc32("".join(parts).encode()) & 0xFFFFFFFF
+
+    def snapshot(self, index: int) -> dict[str, Any]:
+        return self._message(
+            "snapshot",
+            index,
+            [
+                {"price": _kr_price(t), "qty": q}
+                for t, q in sorted(self.bids.items(), reverse=True)
+            ],
+            [{"price": _kr_price(t), "qty": q} for t, q in sorted(self.asks.items())],
+        )
+
+    def update(self, index: int) -> dict[str, Any]:
+        """Move one bid level, the way a real diff message does."""
+        ticks = _KR_BID - (index % _KR_LEVELS) * _KR_TICK
+        qty = _kr_qty(100000 + index % 7)
+        self.bids[ticks] = qty
+        return self._message(
+            "update", index, [{"price": _kr_price(ticks), "qty": qty}], []
+        )
+
+    def _message(
+        self,
+        kind: str,
+        index: int,
+        bids: list[dict[str, str]],
+        asks: list[dict[str, str]],
+    ) -> dict[str, Any]:
+        return {
+            "channel": "book",
+            "type": kind,
+            "data": [
+                {
+                    "symbol": _KR_SYMBOL,
+                    "bids": bids,
+                    "asks": asks,
+                    "checksum": self.checksum(),
+                    "timestamp": _kr_time(index),
+                }
+            ],
+        }
+
+
+def _kr_token(value: str) -> str:
+    return value.replace(".", "").lstrip("0") or "0"
+
+
+def kraken_control(index: int) -> dict[str, Any]:
+    """A heartbeat — outside any sequence, because there is no sequence."""
+    return {"channel": "heartbeat"}
+
+
+def kraken_capture(*, count: int, snapshot_every: int = 0) -> list[CaptureRecord]:
+    """`count` consistent updates, with a snapshot at 0 and every `n` after.
+
+    Unlike the other two builders there is nothing to keep chained here. What
+    is kept correct is the checksum on every message, which is the only claim
+    a Kraken capture makes about itself.
+    """
+    positions = {0}
+    if snapshot_every > 0:
+        positions |= set(range(snapshot_every, count, snapshot_every))
+
+    session = _KrakenSession()
+    records: list[CaptureRecord] = []
+
+    def append(kind: Kind, payload: dict[str, Any]) -> None:
+        seq = len(records) + 1
+        records.append(
+            CaptureRecord(
+                stream=_KR_STREAM,
+                kind=kind,
+                seq=seq,
+                receive_ts=1_700_000_000_000_000_000 + seq * _STEP_NS,
+                monotonic_ts=seq * _STEP_NS,
+                payload=json.dumps(payload),
+            )
+        )
+
+    for index in range(count):
+        if index in positions:
+            append("control", kraken_control(index))
+            append("snapshot", session.snapshot(index))
+        append("frame", session.update(index))
     return records

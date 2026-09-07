@@ -15,6 +15,7 @@ from __future__ import annotations
 from collector.adapters.base import Venue
 from collector.adapters.binance import BinanceAdapter
 from collector.adapters.coinbase import CoinbaseAdapter
+from collector.adapters.kraken import KrakenAdapter
 from collector.settings import CollectorSettings
 
 
@@ -33,6 +34,8 @@ def build(settings: CollectorSettings) -> Venue:
         )
     if settings.venue == "coinbase":
         return CoinbaseAdapter(**_endpoints(settings, "ws_url"))
+    if settings.venue == "kraken":
+        return KrakenAdapter(depth=settings.depth, **_endpoints(settings, "ws_url"))
     raise ValueError(f"no adapter for venue {settings.venue!r}")
 
 

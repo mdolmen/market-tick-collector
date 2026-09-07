@@ -23,7 +23,7 @@ class CollectorSettings(Settings):
     # connection supervisor (Phase 3) and ``ServiceApp`` (Phase 4); until then
     # a venue is a process, which keeps ``WorkerApp``'s one-source contract
     # untouched.
-    venue: Literal["binance", "coinbase"] = "binance"
+    venue: Literal["binance", "coinbase", "kraken"] = "binance"
     symbol: str = "BTCUSDT"
     duration_s: float = 60.0
 
@@ -31,6 +31,12 @@ class CollectorSettings(Settings):
     # volume is the reason this project exists.
     depth_interval_ms: int = 100
     snapshot_limit: int = 5000
+
+    # Kraken's book channel is depth-limited — 10/25/100/500/1000 and nothing
+    # else — so unlike the other two there is no full-depth subscription to
+    # ask for. 1000 is the venue's ceiling and the closest this project gets
+    # to its own assumption. The checksum covers the top 10 regardless.
+    depth: int = 1000
 
     # How often to land a snapshot even when the sequence is healthy. It makes
     # a capture recoverable from an *injected* fault (which removes frames but
