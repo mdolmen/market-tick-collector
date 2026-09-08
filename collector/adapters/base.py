@@ -442,6 +442,22 @@ class VenueTransport(Protocol):
         """
         ...
 
+    def snapshot_interval_s(self) -> float:
+        """The shortest safe spacing between two out-of-band snapshot fetches.
+
+        Zero where the venue sends its snapshot in band and there is no fetch
+        to pace at all.
+
+        **Not optional, and not a nicety.** Binance prices `GET /api/v3/depth`
+        by requested depth against a per-minute request-weight budget, and a
+        full-depth snapshot is the most expensive read it offers. Bootstrapping
+        188 symbols as fast as their first frames arrive exceeded the budget
+        and the venue answered `418` — an automatic IP ban, not a throttle —
+        which killed every shard on the run. Measured 2026-09-08; before the
+        pacer that run landed 56 records in two minutes.
+        """
+        ...
+
     def snapshot_request(self, symbol: str) -> SnapshotRequest | None:
         """The out-of-band fetch, or `None` when the venue sends its own.
 
@@ -484,3 +500,15 @@ def bootstrap_by_sequence(
             return BootstrapResult(BootstrapOutcome.SNAPSHOT_TOO_OLD)
         return BootstrapResult(BootstrapOutcome.READY, index)
     return BootstrapResult(BootstrapOutcome.BUFFER_BEHIND)
+
+
+class SnapshotPacer(Protocol):
+    """Spacing between out-of-band snapshot fetches, shared across a venue.
+
+    A rate limit is per IP, not per connection, so this is one object for the
+    whole run rather than one per shard.
+    """
+
+    def acquire(self) -> None:
+        """Block until another snapshot fetch is within the venue's budget."""
+        ...

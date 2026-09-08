@@ -56,6 +56,11 @@ class CollectorSettings(Settings):
     # shard size. 30 matches the smallest venue cap, so every venue shards.
     max_symbols_per_shard: int = 30
 
+    # A socket that is open but silent for this long is reconnected.
+    # `websockets` already detects a peer that stops answering pings, so this
+    # covers only the connection that stays alive and stops sending data.
+    liveness_timeout_s: float = 60.0
+
     # Shard *i* opens at ``i * shard_stagger_s``, so a venue that force-closes
     # a connection after a fixed lifetime never expires them all at once.
     shard_stagger_s: float = 1.0

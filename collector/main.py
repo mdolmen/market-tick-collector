@@ -115,6 +115,7 @@ def _shard_sources(settings: CollectorSettings) -> list[FrameSource]:
             duration_s=settings.duration_s,
             snapshot_interval_s=settings.snapshot_interval_s,
             subscribe_grace_s=settings.subscribe_grace_s,
+            liveness_timeout_s=settings.liveness_timeout_s,
         )
         for shard in resolve_shards(settings)
     ]

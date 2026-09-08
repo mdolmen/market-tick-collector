@@ -30,10 +30,11 @@ from data_pipeline_core.ingestion.http import HttpClient
 from websockets.exceptions import ConnectionClosedError
 
 from collector import source as source_module
+from collector.adapters.binance import BinanceAdapter
 from collector.adapters.kraken import KrakenAdapter
 from collector.capture import CONTROL_STREAM, CaptureRecord, control_stream
 from collector.source import FrameSource
-from collector.supervisor import ShardSupervisor
+from collector.supervisor import ShardSupervisor, _Pacer
 from tests.conftest import kraken_capture
 
 _SHARDS = (("BTC/USD",), ("ETH/USD",), ("SOL/USD",))
@@ -255,3 +256,76 @@ def test_json_payloads_are_landed_verbatim(monkeypatch: pytest.MonkeyPatch) -> N
     _, records = _supervisor(monkeypatch, scripts)
     for record in records:
         assert json.loads(record["payload"]), "every payload round-trips"
+
+
+def test_the_snapshot_pacer_spaces_fetches_across_every_shard() -> None:
+    """A venue's REST budget is per IP, so one pacer serves the whole run.
+
+    Pacing each connection separately lets N shards together exceed the budget
+    by a factor of N. Binance answers that with `418` — an automatic IP ban,
+    not a throttle — which killed every shard on a live 188-symbol run and
+    landed 56 records in two minutes.
+    """
+    pacer = _Pacer(0.05)
+    started = time.monotonic()
+    for _ in range(5):
+        pacer.acquire()
+    elapsed = time.monotonic() - started
+
+    # The first goes straight through; the other four wait their turn.
+    assert elapsed >= 4 * 0.05
+    assert elapsed < 4 * 0.05 + 0.5
+
+
+def test_an_unpaced_venue_never_waits() -> None:
+    """Zero interval is a venue whose snapshot arrives in band."""
+    pacer = _Pacer(0.0)
+    started = time.monotonic()
+    for _ in range(100):
+        pacer.acquire()
+    assert time.monotonic() - started < 0.05
+
+
+def test_binance_prices_its_snapshot_by_depth() -> None:
+    """The spacing comes from the venue's own request-weight table.
+
+    Not a constant: a full-depth snapshot is 250 weight against 6000 a minute,
+    a shallow one is 5. Getting this from the configured depth is what makes
+    the shard's bootstrap cost visible rather than a surprise.
+    """
+    deep = BinanceAdapter(snapshot_limit=5000).snapshot_interval_s()
+    shallow = BinanceAdapter(snapshot_limit=100).snapshot_interval_s()
+
+    assert deep > shallow > 0
+    # 250 weight of 6000 a minute is 2.5s, before the safety margin.
+    assert deep >= 2.5
+    assert KrakenAdapter(depth=10).snapshot_interval_s() == 0.0
+
+
+def test_a_silent_socket_is_reconnected_rather_than_waited_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The one liveness case `websockets` does not already cover.
+
+    Its own ping/pong raises when a peer stops answering. What is left is a
+    connection the venue holds open at the TCP level while sending no book
+    data — the shape of the Phase 2.5 rejected subscription, and of a venue
+    that has quietly dropped a subscription mid-run. It has to be reconnected,
+    not waited out.
+    """
+    # Two messages then silence, with a liveness timeout well inside the run.
+    scripts = {s[0]: [_Script(_messages(s[0], 2))] for s in _SHARDS}
+    monkeypatch.setattr(source_module, "connect", _Factory(scripts), raising=True)
+    source = FrameSource(
+        venue=partial(KrakenAdapter, depth=10, ws_url=_url("BTC/USD")),
+        symbols=["BTC/USD"],
+        duration_s=2.0,
+        subscribe_grace_s=10.0,
+        liveness_timeout_s=0.3,
+    )
+    supervisor = ShardSupervisor(sources=[source], duration_s=2.0, backoff_base_s=0.01)
+    ctx = RunContext.create(source_name="test", http=cast(HttpClient, None))
+    list(supervisor.fetch(ctx))
+
+    assert supervisor.reconnects >= 1, "silence must force a reconnect"
+    assert supervisor.failures[0] >= 1

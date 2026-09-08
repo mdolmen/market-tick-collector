@@ -53,6 +53,16 @@ _REST_URL = "https://api.binance.com/api/v3/depth"
 
 _MS_TO_NS = 1_000_000
 
+# `GET /api/v3/depth` request weight by requested depth, and the per-IP budget
+# it is charged against. Venue values, so they live in the adapter and never in
+# the SDK — `NOTES.md` § *Two halves*.
+_DEPTH_WEIGHTS = ((100, 5), (500, 25), (1000, 50), (5000, 250))
+_WEIGHT_BUDGET = 6000.0
+_WEIGHT_WINDOW_S = 60.0
+# Exceeding the budget is answered with 418, an automatic IP ban rather than a
+# throttle, so the spacing is deliberately loose.
+_WEIGHT_MARGIN = 1.5
+
 
 def stream_name(symbol: str, interval_ms: int) -> str:
     """Binance's raw-stream name for a full-depth diff channel."""
@@ -128,6 +138,23 @@ class BinanceAdapter:
 
     def stream_tag(self, symbol: str) -> str:
         return stream_name(symbol, self._depth_interval_ms)
+
+    def snapshot_interval_s(self) -> float:
+        """From the venue's own request-weight table for `depth`.
+
+        Weight by requested depth — 5 up to 100 levels, 25 to 500, 50 to 1000,
+        **250 to 5000** — against 6000 weight a minute per IP. At the 5000 this
+        project asks for, that is 24 snapshots a minute and 2.5s between them;
+        bootstrapping 188 symbols therefore takes ~8 minutes, which is a real
+        cost of full-depth snapshots and an argument for a shallower
+        `snapshot_limit` that Phase 6 owns rather than this one.
+
+        The margin is deliberate: the budget is shared with every other call
+        the run makes, and the penalty for exceeding it is an IP ban rather
+        than a rejected request.
+        """
+        weight = next(w for limit, w in _DEPTH_WEIGHTS if self._snapshot_limit <= limit)
+        return _WEIGHT_WINDOW_S * weight / _WEIGHT_BUDGET * _WEIGHT_MARGIN
 
     def snapshot_request(self, symbol: str) -> SnapshotRequest | None:
         return SnapshotRequest(

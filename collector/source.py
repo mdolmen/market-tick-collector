@@ -43,7 +43,7 @@ import json
 import time
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
 from data_pipeline_core import RunContext
 from websockets.sync.client import ClientConnection, connect
@@ -74,6 +74,27 @@ _MAX_MESSAGE_BYTES = 16 * 1024 * 1024
 # got one. A rejection comes back in well under a second on all three venues;
 # this is generous so a slow first snapshot is never mistaken for one.
 _SUBSCRIBE_GRACE_S = 15.0
+
+# A socket that is open but has said nothing for this long is treated as dead
+# and reconnected. `websockets` runs its own ping/pong and raises when a peer
+# stops answering, so this covers only the case that leaves: a connection the
+# venue keeps alive at the TCP level while sending no book data. Every shard
+# here carries at least one symbol with a measured rate above 0.03 msg/s, so a
+# whole minute of silence is not a quiet market.
+_LIVENESS_TIMEOUT_S = 60.0
+
+
+class _Pace(Protocol):
+    """Just enough of a pacer for the source to hold one."""
+
+    def acquire(self) -> None: ...
+
+
+class _NoPace:
+    """The default, for a venue with nothing to pace or a source run alone."""
+
+    def acquire(self) -> None:
+        return None
 
 
 @dataclass(slots=True)
@@ -118,6 +139,7 @@ class FrameSource:
         duration_s: float,
         snapshot_interval_s: float = 0.0,
         subscribe_grace_s: float = _SUBSCRIBE_GRACE_S,
+        liveness_timeout_s: float = _LIVENESS_TIMEOUT_S,
     ) -> None:
         """`venue` is a *factory*, because a shard needs more than one.
 
@@ -149,6 +171,7 @@ class FrameSource:
         self._duration_s = duration_s
         self._snapshot_interval_s = snapshot_interval_s
         self._subscribe_grace_s = subscribe_grace_s
+        self._liveness_timeout_s = liveness_timeout_s
         # Tag to symbol, which is the direction the receive path needs:
         # ``stream_of`` hands back a tag and the state is keyed by symbol.
         self._symbol_of = {self._venue.stream_tag(s): s for s in self.symbols}
@@ -179,6 +202,11 @@ class FrameSource:
         self._seq = 0
         self._control = 0
         self._resubscribes = 0
+        # The venue's own spacing for out-of-band fetches, and the object that
+        # enforces it. The supervisor replaces this with one shared across
+        # every shard, because the budget is per IP rather than per socket.
+        self.snapshot_interval_s = self._venue.snapshot_interval_s()
+        self.pacer: _Pace = _NoPace()
 
     def dropped(self, stream: str) -> None:
         """A record for this stream was dropped before it could be landed.
@@ -332,14 +360,28 @@ class FrameSource:
         gap that never happened. ``FaultInjector`` already leaves every
         non-frame record alone, so landing it costs nothing downstream.
         """
+        last_heard = time.monotonic()
         while True:
-            remaining = deadline - time.monotonic()
+            now = time.monotonic()
+            remaining = deadline - now
             if remaining <= 0 or ctx.should_stop():
                 return None
+            if (
+                self._liveness_timeout_s > 0
+                and now - last_heard > self._liveness_timeout_s
+            ):
+                # An `OSError`, so the supervisor treats it as the transport
+                # failure it is and reconnects this shard alone.
+                raise ConnectionError(
+                    f"no message on {self._venue.venue} in "
+                    f"{self._liveness_timeout_s:.0f}s across "
+                    f"{len(self.symbols)} symbol(s); assuming the socket is dead"
+                )
             try:
                 message = ws.recv(timeout=min(remaining, _RECV_SLICE_S))
             except TimeoutError:
                 continue
+            last_heard = time.monotonic()
             receive_ts = time.time_ns()
             monotonic_ts = time.monotonic_ns()
             text = message if isinstance(message, str) else message.decode()
@@ -516,6 +558,9 @@ class FrameSource:
         """
         request = self._requests[symbol]
         assert request is not None  # only the out-of-band path gets here
+        # Before the call, not after: the venue prices the request itself, and
+        # exceeding its budget is answered with a ban rather than a rejection.
+        self.pacer.acquire()
         response = ctx.http.get(request.url, params=dict(request.params))
         if response.status_code != 200:
             raise RuntimeError(f"depth snapshot returned {response.status_code}")

@@ -62,6 +62,38 @@ _DRAIN_SLICE_S = 0.2
 _BACKOFF_SLICE_S = 0.5
 
 
+class _Pacer:
+    """A minimum interval between snapshot fetches, shared by every shard.
+
+    A venue's REST budget is per IP, so pacing each connection separately would
+    let N shards together exceed it by a factor of N — which is exactly how a
+    188-symbol Binance run earned a `418` and landed 56 records in two minutes.
+    One pacer for the run, a lock, and a next-allowed timestamp.
+
+    Blocking is correct here and is not the guardrail violation it looks like.
+    It blocks the *reader* thread of one shard, and that is the same thread the
+    fetch itself already blocks; the alternative is being banned, which stops
+    every shard. Phase 5's queue is what keeps a stalled reader from reaching
+    the sink. Moving the fetch onto a thread of its own is the real fix and it
+    belongs with the rest of the backpressure work.
+    """
+
+    def __init__(self, interval_s: float) -> None:
+        self._interval = interval_s
+        self._lock = threading.Lock()
+        self._next_at = 0.0
+
+    def acquire(self) -> None:
+        if self._interval <= 0:
+            return
+        with self._lock:
+            now = time.monotonic()
+            wait = max(0.0, self._next_at - now)
+            self._next_at = max(now, self._next_at) + self._interval
+        if wait:
+            time.sleep(wait)
+
+
 class ShardSupervisor:
     """Run one venue's shards concurrently and yield their records in order.
 
@@ -88,6 +120,10 @@ class ShardSupervisor:
         self._rotate_after_s = rotate_after_s
         self._backoff_base_s = backoff_base_s
         self._queue: Queue[CaptureRecord] = Queue(maxsize=queue_maxsize)
+        # One for the run: the venue's REST budget is per IP, not per socket.
+        pacer = _Pacer(self._sources[0].snapshot_interval_s)
+        for source in self._sources:
+            source.pacer = pacer
         self._stop = threading.Event()
         self._seq = 0
 

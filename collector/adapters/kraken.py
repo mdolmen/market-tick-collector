@@ -272,6 +272,10 @@ class KrakenAdapter:
     def stream_tag(self, symbol: str) -> str:
         return f"{_CHANNEL}:{symbol.upper()}"
 
+    def snapshot_interval_s(self) -> float:
+        """Zero: the snapshot arrives in band, so there is no fetch to pace."""
+        return 0.0
+
     def snapshot_request(self, symbol: str) -> SnapshotRequest | None:
         """None: the snapshot arrives on the socket, so there is nothing to fetch."""
         return None
