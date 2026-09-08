@@ -121,13 +121,17 @@ class ShardSupervisor:
         self._backoff_base_s = backoff_base_s
         self._queue: Queue[CaptureRecord] = Queue(maxsize=queue_maxsize)
         # One for the run: the venue's REST budget is per IP, not per socket.
-        pacer = _Pacer(self._sources[0].snapshot_interval_s)
+        self._pacer = _Pacer(self._sources[0].snapshot_interval_s)
+        # Out-of-band snapshot fetches, taken off the reader threads entirely.
+        self._snapshots: Queue[tuple[FrameSource, str]] = Queue()
         for source in self._sources:
-            source.pacer = pacer
+            source.pacer = self._pacer
+            source.submit_snapshot = self._submit_snapshot
         self._stop = threading.Event()
         self._seq = 0
 
         self.dropped = 0
+        self.snapshot_failures = 0
         self.reconnects = 0
         self.rotations = 0
         # Per shard, so "a failure never crosses connections" is checkable
@@ -135,6 +139,47 @@ class ShardSupervisor:
         self.failures: list[int] = [0] * len(self._sources)
 
     # --- the Source contract -----------------------------------------------
+
+    def _submit_snapshot(self, source: FrameSource, symbol: str) -> None:
+        """Queued from a reader thread, served by the snapshot thread."""
+        self._snapshots.put((source, symbol))
+
+    def _run_snapshots(self, ctx: RunContext, deadline: float) -> None:
+        """One thread for every out-of-band fetch the run makes.
+
+        It exists so no reader thread ever blocks on HTTP. `ctx.http` retries
+        with backoff and the pacer adds the venue's own required spacing on
+        top, which together stalled a reader long enough for the liveness
+        watchdog to declare the feed dead: 25 reconnects across seven shards
+        on a 188-symbol Binance capture, each one re-fetching what it had just
+        abandoned.
+
+        One thread rather than a pool, because the pacer would serialise a
+        pool anyway — the venue's budget is per IP.
+        """
+        while not self._stopping(deadline):
+            try:
+                source, symbol = self._snapshots.get(timeout=_DRAIN_SLICE_S)
+            except Empty:
+                continue
+            self._pacer.acquire()
+            if self._stopping(deadline):
+                return
+            try:
+                record = source.fetch_snapshot(ctx, symbol)
+            except Exception as error:
+                # A failed snapshot leaves that book untrusted and nothing
+                # else; the symbol's skip stays latched, so the next frame
+                # asks again. Killing the run over one of them would throw
+                # away every other book on every other shard.
+                self.snapshot_failures += 1
+                ctx.logger.warning(
+                    "snapshot fetch failed",
+                    symbol=symbol,
+                    error=f"{type(error).__name__}: {error}",
+                )
+                continue
+            self._offer(record, source)
 
     def fetch(self, ctx: RunContext) -> Iterator[CaptureRecord]:
         deadline = time.monotonic() + self._duration_s
@@ -147,6 +192,14 @@ class ShardSupervisor:
             )
             for index, source in enumerate(self._sources)
         ]
+        threads.append(
+            threading.Thread(
+                target=self._run_snapshots,
+                args=(ctx, deadline),
+                name="snapshots",
+                daemon=True,
+            )
+        )
         for thread in threads:
             thread.start()
         try:
@@ -250,6 +303,7 @@ class ShardSupervisor:
             shards=len(self._sources),
             records=self._seq,
             dropped=self.dropped,
+            snapshot_failures=self.snapshot_failures,
             reconnects=self.reconnects,
             rotations=self.rotations,
             failures_per_shard=self.failures,

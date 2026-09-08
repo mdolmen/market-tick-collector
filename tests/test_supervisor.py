@@ -35,7 +35,7 @@ from collector.adapters.kraken import KrakenAdapter
 from collector.capture import CONTROL_STREAM, CaptureRecord, control_stream
 from collector.source import FrameSource
 from collector.supervisor import ShardSupervisor, _Pacer
-from tests.conftest import kraken_capture
+from tests.conftest import kraken_capture, kraken_control
 
 _SHARDS = (("BTC/USD",), ("ETH/USD",), ("SOL/USD",))
 
@@ -374,3 +374,39 @@ def test_a_shard_that_hears_nothing_at_all_still_fails(
 
     with pytest.raises(RuntimeError, match="no book message at all"):
         list(source.fetch(ctx))
+
+
+def test_heartbeats_do_not_keep_a_dead_feed_alive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Liveness counts book messages, not any message.
+
+    Measured: a 188-symbol Kraken capture had three of seven shards deliver
+    every symbol's snapshot and then stop — 11, 26 and 28 records against
+    44,000 to 58,000 on their neighbours — and nothing reconnected, because the
+    venue heartbeats once a second and a watchdog counting those sees a healthy
+    socket forever.
+    """
+    heartbeat = json.dumps(kraken_control(0))
+    # One book message, then heartbeats for ever: alive, and useless. The
+    # reconnect gets a healthy script, so the run recovers rather than failing
+    # the subscription check on a second dead socket.
+    dead = _Script([_messages("BTC/USD", 1)[0], *[heartbeat] * 200])
+    healthy = _Script(_messages("BTC/USD", 20))
+    monkeypatch.setattr(
+        source_module, "connect", _Factory({"BTC/USD": [dead, healthy]}), raising=True
+    )
+    source = FrameSource(
+        venue=partial(KrakenAdapter, depth=10, ws_url=_url("BTC/USD")),
+        symbols=["BTC/USD"],
+        duration_s=1.5,
+        subscribe_grace_s=10.0,
+        liveness_timeout_s=0.3,
+    )
+    supervisor = ShardSupervisor(sources=[source], duration_s=1.5, backoff_base_s=0.01)
+    ctx = RunContext.create(source_name="test", http=cast(HttpClient, None))
+    list(supervisor.fetch(ctx))
+
+    assert supervisor.reconnects >= 1, (
+        "a feed sending only control traffic must be reconnected"
+    )

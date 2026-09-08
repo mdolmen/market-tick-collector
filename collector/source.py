@@ -75,12 +75,22 @@ _MAX_MESSAGE_BYTES = 16 * 1024 * 1024
 # this is generous so a slow first snapshot is never mistaken for one.
 _SUBSCRIBE_GRACE_S = 15.0
 
-# A socket that is open but has said nothing for this long is treated as dead
-# and reconnected. `websockets` runs its own ping/pong and raises when a peer
-# stops answering, so this covers only the case that leaves: a connection the
-# venue keeps alive at the TCP level while sending no book data. Every shard
-# here carries at least one symbol with a measured rate above 0.03 msg/s, so a
-# whole minute of silence is not a quiet market.
+# A connection that has produced no *book* message for this long is treated as
+# dead and reconnected. `websockets` runs its own ping/pong and raises when a
+# peer stops answering, so what is left is a socket the venue keeps alive while
+# sending nothing useful.
+#
+# **Book messages, not any message, and that distinction was measured.** A
+# 188-symbol Kraken capture across seven shards had three of them deliver every
+# symbol's snapshot and then stop: 11, 26 and 28 records where their neighbours
+# carried 44,000 to 58,000. Nothing reconnected, because Kraken heartbeats once
+# a second on every connection and a watchdog counting those sees a healthy
+# socket forever. Counting only frames and snapshots is what makes the failure
+# visible at all.
+#
+# The window is generous against the rate table: the quietest measured symbol
+# runs at 0.03 msg/s, so a shard of thirty is expected to speak far inside a
+# minute even when every symbol on it is illiquid.
 _LIVENESS_TIMEOUT_S = 60.0
 
 
@@ -207,6 +217,14 @@ class FrameSource:
         # every shard, because the budget is per IP rather than per socket.
         self.snapshot_interval_s = self._venue.snapshot_interval_s()
         self.pacer: _Pace = _NoPace()
+        # Set by the supervisor to hand the fetch to a thread of its own. Left
+        # None, this class fetches inline, which is right for a single source
+        # driven directly (a test, `tools/recovery.py`) and wrong for a shard —
+        # see `_snapshot_due_action`.
+        self.submit_snapshot: Callable[[FrameSource, str], None] | None = None
+        # Symbols with a fetch already in flight, so a busy stream cannot ask
+        # for the same snapshot a hundred times while the first is pending.
+        self._pending: set[str] = set()
 
     def dropped(self, stream: str) -> None:
         """A record for this stream was dropped before it could be landed.
@@ -275,7 +293,9 @@ class FrameSource:
                 # result ourselves; in band we ask the venue and its answer
                 # arrives as an ordinary record a few messages later.
                 if self._out_of_band:
-                    yield self._snapshot_record(ctx, symbol)
+                    fetched = self._snapshot_due_action(ctx, symbol)
+                    if fetched is not None:
+                        yield fetched
                 else:
                     self._resubscribe(ws, ctx, symbol)
             if not checked_subscription:
@@ -340,6 +360,33 @@ class FrameSource:
             f"certainly rejected; check the venue's spelling of {list(self.symbols)!r}"
         )
 
+    def _snapshot_due_action(
+        self, ctx: RunContext, symbol: str
+    ) -> CaptureRecord | None:
+        """Fetch the snapshot, or hand the fetch to whoever owns that.
+
+        **The fetch must not happen on this thread when a shard is running**,
+        and that is a guardrail rather than a preference. `ctx.http` retries
+        with backoff, and the pacer that keeps the venue's request budget adds
+        seconds more — all of it with the socket unread. Measured: a
+        188-symbol Binance capture spent so long paced inside this call that
+        the liveness watchdog decided the feed was dead, and the run logged
+        **25 reconnects** across seven shards and landed 3638 records. Each
+        reconnect re-subscribed and re-fetched, which made it worse.
+
+        So the supervisor sets `submit_snapshot` and the fetch happens on a
+        thread of its own; the record reaches the sink through the same queue
+        as everything else, a little later than the frame that triggered it.
+        Inline stays the default for a source driven on its own.
+        """
+        if self.submit_snapshot is None:
+            return self.fetch_snapshot(ctx, symbol)
+        if symbol in self._pending:
+            return None
+        self._pending.add(symbol)
+        self.submit_snapshot(self, symbol)
+        return None
+
     def _resubscribe(self, ws: ClientConnection, ctx: RunContext, symbol: str) -> None:
         """Ask an in-band venue for a fresh snapshot, and land nothing yet.
 
@@ -390,15 +437,16 @@ class FrameSource:
                 # An `OSError`, so the supervisor treats it as the transport
                 # failure it is and reconnects this shard alone.
                 raise ConnectionError(
-                    f"no message on {self._venue.venue} in "
+                    f"no book message on {self._venue.venue} in "
                     f"{self._liveness_timeout_s:.0f}s across "
-                    f"{len(self.symbols)} symbol(s); assuming the socket is dead"
+                    f"{len(self.symbols)} symbol(s) "
+                    f"({self._control} control record(s) in that time); "
+                    f"the socket is alive but the feed is not"
                 )
             try:
                 message = ws.recv(timeout=min(remaining, _RECV_SLICE_S))
             except TimeoutError:
                 continue
-            last_heard = time.monotonic()
             receive_ts = time.time_ns()
             monotonic_ts = time.monotonic_ns()
             text = message if isinstance(message, str) else message.decode()
@@ -414,6 +462,9 @@ class FrameSource:
             # than attributed to a symbol, so the capture stays honest.
             symbol = self._symbol_of.get(stream) if stream is not None else None
             kind = self._venue.classify(stream or self._control_stream, payload)
+            if kind != "control":
+                # Only book traffic counts as alive; see `_LIVENESS_TIMEOUT_S`.
+                last_heard = time.monotonic()
             self._track(kind, payload, symbol)
             return (
                 self._record(
@@ -562,19 +613,21 @@ class FrameSource:
 
     # --- fetching ----------------------------------------------------------
 
-    def _snapshot_record(self, ctx: RunContext, symbol: str) -> CaptureRecord:
+    def fetch_snapshot(self, ctx: RunContext, symbol: str) -> CaptureRecord:
         """Through ``ctx.http``, so it inherits retry, backoff and the breaker.
 
         The websocket gets none of that, and that asymmetry is the argument for
         the connection supervisor in Phase 3.
 
-        Still inline on the reading thread, which is the coupling the
-        supervisor exists to break: this call retries with backoff and can
-        block for seconds while the socket goes unread. One symbol made that
-        tolerable and a shard does not.
+        **Called on the snapshot thread when a shard is running**, so the
+        blocking here costs no socket reads. `_snapshot_due_action` explains
+        what happened when it did not. The state it writes belongs to one
+        symbol and is read by the reader thread; the writes are single
+        assignments of immutable values, which is what makes that safe.
         """
         request = self._requests[symbol]
         assert request is not None  # only the out-of-band path gets here
+        self._pending.discard(symbol)
         # Before the call, not after: the venue prices the request itself, and
         # exceeding its budget is answered with a ban rather than a rejection.
         self.pacer.acquire()
