@@ -268,6 +268,41 @@ OVERLAPPING_BASES: Final[tuple[str, ...]] = (
 )
 
 
+# Symbols a venue quotes with more precision than `SCALE` can hold, so this
+# project cannot represent them at all. Derived, not guessed: re-run
+# `uv run python -m tools.precision <venue> --depth 1000` after any relisting.
+#
+# Measured 2026-09-08 over all 188 bases at the depth the collector subscribes.
+# All three are sub-cent assets and all three are Kraken's, whose deep levels
+# carry nine decimal places — `BONK/USD` at `price=0.000003072`. Binance and
+# Coinbase quote nothing past eight.
+#
+# **The extra digits are at the bottom of the book, not at the touch.** The same
+# 188 symbols at Kraken depth 10 are entirely clean, so this list is a function
+# of the subscribed depth and has to be re-derived if that changes.
+#
+# Excluding them is a deliberate narrowing of the Phase 2 symbol set, taken in
+# preference to widening `SCALE` project-wide. `collector/model.py` refuses to
+# truncate a price rather than lose a digit silently, and that refusal stands.
+EXCLUDED: Final[dict[str, tuple[str, ...]]] = {
+    "kraken": ("BONK/USD", "PEPE/USD", "SHIB/USD"),
+}
+
+
+def tradable(venue: str) -> tuple[str, ...]:
+    """Every overlapping base in this venue's spelling, minus the unrepresentable.
+
+    What a run subscribes to. `OVERLAPPING_BASES` is what the three venues have
+    in common; this is what is also expressible at `SCALE`.
+    """
+    excluded = set(EXCLUDED.get(venue, ()))
+    return tuple(
+        symbol
+        for symbol in (native(base, venue) for base in OVERLAPPING_BASES)
+        if symbol not in excluded
+    )
+
+
 def canonical(base: str, venue: str) -> str:
     """The project-wide id for one venue's market in `base`.
 

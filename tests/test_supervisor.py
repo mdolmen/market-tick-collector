@@ -410,3 +410,41 @@ def test_heartbeats_do_not_keep_a_dead_feed_alive(
     assert supervisor.reconnects >= 1, (
         "a feed sending only control traffic must be reconnected"
     )
+
+
+def test_a_shard_that_cannot_parse_stops_loudly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A data error is not a transport error and must not die quietly.
+
+    Kraken quotes three sub-cent assets with nine decimal places, which
+    `SCALE = 8` refuses rather than truncating. Before this, the exception
+    escaped the shard thread and the run reported `failures_per_shard` all zero
+    while three of seven shards were dead — 163 of 188 streams landed and
+    nothing said why. `collector/symbols.py` excludes the known three; this is
+    what makes the next relisting visible.
+    """
+    # A price with nine decimal places, which `scaled_int` refuses.
+    bad = json.loads(_messages("BTC/USD", 2)[1])
+    bad["data"][0]["bids"] = [{"price": 0.000003072, "qty": 1.0}]
+    script = _Script([_messages("BTC/USD", 1)[0], json.dumps(bad)])
+    monkeypatch.setattr(
+        source_module, "connect", _Factory({"BTC/USD": [script]}), raising=True
+    )
+    supervisor = ShardSupervisor(
+        sources=[
+            FrameSource(
+                venue=partial(KrakenAdapter, depth=10, ws_url=_url("BTC/USD")),
+                symbols=["BTC/USD"],
+                duration_s=0.6,
+                subscribe_grace_s=5.0,
+            )
+        ],
+        duration_s=0.6,
+        backoff_base_s=0.01,
+    )
+    ctx = RunContext.create(source_name="test", http=cast(HttpClient, None))
+    list(supervisor.fetch(ctx))
+
+    assert supervisor.fatal == 1, "the shard must be reported as stopped"
+    assert supervisor.reconnects == 0, "reconnecting cannot fix a data error"

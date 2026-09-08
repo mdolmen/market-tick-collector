@@ -132,6 +132,8 @@ class ShardSupervisor:
 
         self.dropped = 0
         self.snapshot_failures = 0
+        # Shards that stopped for a reason no reconnect can fix.
+        self.fatal = 0
         self.reconnects = 0
         self.rotations = 0
         # Per shard, so "a failure never crosses connections" is checkable
@@ -267,6 +269,26 @@ class ShardSupervisor:
                 )
                 self._wait(backoff.delay(attempt - 1), deadline)
                 continue
+            except Exception as error:
+                # Not a transport failure, so reconnecting cannot fix it and
+                # retrying would loop on the same message for ever. What it
+                # must not do is die quietly: this shard's books simply stop,
+                # and before this the run reported `failures_per_shard` all
+                # zero while three of seven Kraken shards were dead.
+                #
+                # The case that put it here is a venue quoting more precision
+                # than `SCALE` holds — `collector/symbols.py` excludes the
+                # three known ones, and this is what makes the next relisting
+                # visible rather than a silent hole in the capture.
+                self.fatal += 1
+                ctx.logger.error(
+                    "shard stopped, and it will not come back",
+                    shard=index,
+                    venue=source.name,
+                    symbols=list(source.symbols),
+                    error=f"{type(error).__name__}: {error}",
+                )
+                return
             # A clean return means the window closed: either the run is over,
             # or this was a rotation and the shard reconnects immediately.
             attempt = 0
@@ -304,6 +326,7 @@ class ShardSupervisor:
             records=self._seq,
             dropped=self.dropped,
             snapshot_failures=self.snapshot_failures,
+            fatal_shards=self.fatal,
             reconnects=self.reconnects,
             rotations=self.rotations,
             failures_per_shard=self.failures,

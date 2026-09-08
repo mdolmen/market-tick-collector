@@ -65,7 +65,7 @@ from collector.shard import plan_shards, shard_size
 from collector.sinks import ConsoleSink
 from collector.source import FrameSource
 from collector.supervisor import ShardSupervisor
-from collector.symbols import OVERLAPPING_BASES, native
+from collector.symbols import tradable
 
 
 def _channel(settings: CollectorSettings) -> str:
@@ -82,7 +82,7 @@ def resolve_symbols(settings: CollectorSettings) -> tuple[str, ...]:
     if not settings.symbols:
         return (settings.symbol,)
     if settings.symbols.strip() == "*":
-        return tuple(native(base, settings.venue) for base in OVERLAPPING_BASES)
+        return tradable(settings.venue)
     return tuple(s.strip() for s in settings.symbols.split(",") if s.strip())
 
 
