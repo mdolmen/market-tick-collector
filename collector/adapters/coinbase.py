@@ -105,6 +105,10 @@ class CoinbaseAdapter:
 
     venue = VENUE
 
+    # Measured 2026-09-08: 30 accepted, 31 answered `too many L2 streams
+    # requested in a single session`. The smallest cap of the three by 30x.
+    max_symbols_per_connection = 30
+
     def __init__(self, *, ws_url: str = _WS_URL) -> None:
         self._ws_url = ws_url
         self._prev_seq: int | None = None

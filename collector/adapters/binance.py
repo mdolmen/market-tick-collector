@@ -76,6 +76,9 @@ class BinanceAdapter:
 
     venue = VENUE
 
+    # 1024 raw streams, documented; 188 verified on one socket 2026-09-08.
+    max_symbols_per_connection = 1024
+
     def __init__(
         self,
         *,

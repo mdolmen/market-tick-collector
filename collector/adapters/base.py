@@ -367,6 +367,17 @@ class VenueTransport(Protocol):
     """How to connect to one venue and, if it needs one, how to fetch a
     snapshot. Only the capture source sees this."""
 
+    # The most symbols this venue will accept on one connection. A measured
+    # number, not a documented one — `NOTES.md` § *Connection supervision*
+    # holds the date and the method for each.
+    #
+    # It is an *upper* bound and usually not the binding one: `collector/shard.py`
+    # takes the minimum of this and the recovery-time budget. Coinbase is the
+    # exception that made this worth having as a field at all — 30, where the
+    # other two are 1024 and 200 — and it is the one venue where the cap binds
+    # first.
+    max_symbols_per_connection: int
+
     def ws_url(self, symbols: Sequence[str]) -> str:
         """The socket to open for this shard. Some venues encode it here."""
         ...

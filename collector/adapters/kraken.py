@@ -230,6 +230,10 @@ class KrakenAdapter:
 
     venue = VENUE
 
+    # 200 symbols, documented; 188 verified at depth 1000 on one socket
+    # 2026-09-08 at 2188 msg/s, which is the whole overlapping set.
+    max_symbols_per_connection = 200
+
     def __init__(self, *, ws_url: str = _WS_URL, depth: int = 1000) -> None:
         self._ws_url = ws_url
         self._depth = depth
