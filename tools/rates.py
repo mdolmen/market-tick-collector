@@ -10,12 +10,19 @@ nobody can re-derive is not a claim — so this measures one, on one connection
 per venue, and `--write` commits the result to `collector/rates.py` the way
 `tools/symbols.py` stands behind `collector/symbols.py`.
 
-**One connection for all 188 on purpose.** The numbers have to be comparable
+**One window for all 188 on purpose.** The numbers have to be comparable
 across symbols, and two connections measured at different times are not: a
-burst on one is an hour the other did not see. One socket for the whole set
-makes every symbol's count a share of the same window. It also happens to be
-the most direct test of the venue's cap, since it subscribes far past any shard
-size this project will ever run.
+burst on one is an hour the other did not see. Every symbol's count has to be
+a share of the *same* window.
+
+One socket is the way to get that where the venue allows it, and Binance (188
+streams, measured) and Kraken (188 symbols at depth 1000, measured) both do.
+Coinbase does not: `level2` is capped at **30 products per session** — 30
+accepted, 31 rejected `{"type":"error","message":"too many L2 streams
+requested in a single session"}` — so 188 needs seven connections there. They
+are opened **concurrently**, one thread each, so the window is still shared and
+the counts still comparable. Sequential chunks would have been seven different
+windows wearing one date.
 
 **What this does not measure.** Rates are not stationary — one piece of news
 moves a single symbol by an order of magnitude for an hour — so the honest
@@ -41,8 +48,10 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import threading
 import time
 from collections.abc import Iterator, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -92,20 +101,39 @@ from typing import Final
 
 
 def measure(
-    venue: Venue, symbols: Sequence[str], *, duration_s: float
+    venue: Venue,
+    symbols: Sequence[str],
+    *,
+    duration_s: float,
+    per_connection: int = 0,
 ) -> tuple[dict[str, int], float]:
-    """Count book messages per symbol over one connection. Returns (counts, elapsed).
+    """Count book messages per symbol. Returns (counts, elapsed).
 
     Seeded with every subscribed tag at zero, so a symbol that never spoke is a
     zero in the result rather than a missing key — silence is the answer to a
     question this asks, not an absence of one.
+
+    ``per_connection`` splits the set across concurrent connections where the
+    venue caps a session; zero means one connection for everything. Concurrent
+    rather than sequential so that every count is still a share of one window.
     """
     counts = {venue.stream_tag(symbol): 0 for symbol in symbols}
+    size = per_connection or len(symbols)
+    chunks = [symbols[i : i + size] for i in range(0, len(symbols), size)]
+    lock = threading.Lock()
     started = time.monotonic()
-    for tag in _stream(venue, symbols, duration_s=duration_s):
-        # An unknown tag means the venue answered about something we did not
-        # ask for, which is worth seeing rather than silently bucketing.
-        counts[tag] = counts.get(tag, 0) + 1
+
+    def drain(chunk: Sequence[str]) -> None:
+        for tag in _stream(venue, chunk, duration_s=duration_s):
+            with lock:
+                # An unknown tag means the venue answered about something we
+                # did not ask for, which is worth seeing rather than silently
+                # bucketing.
+                counts[tag] = counts.get(tag, 0) + 1
+
+    with ThreadPoolExecutor(max_workers=len(chunks)) as pool:
+        for future in [pool.submit(drain, chunk) for chunk in chunks]:
+            future.result()
     return counts, time.monotonic() - started
 
 
@@ -216,6 +244,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="comma-separated base assets; default is every overlapping base",
     )
     parser.add_argument(
+        "--per-connection",
+        type=int,
+        default=0,
+        help=(
+            "split across concurrent connections of this size, for a venue "
+            "that caps a session (Coinbase level2 is 30). 0 means one socket"
+        ),
+    )
+    parser.add_argument(
         "--write",
         action="store_true",
         help=f"emit {_MODULE.relative_to(_MODULE.parent.parent)}",
@@ -231,24 +268,36 @@ def main(argv: Sequence[str] | None = None) -> int:
     symbols = [native(base, args.venue) for base in bases]
     tag_to_base = {venue.stream_tag(native(base, args.venue)): base for base in bases}
 
-    counts, elapsed = measure(venue, symbols, duration_s=args.duration)
+    counts, elapsed = measure(
+        venue, symbols, duration_s=args.duration, per_connection=args.per_connection
+    )
     report(args.venue, counts, elapsed)
 
-    if args.write:
-        rates = {
-            tag_to_base[tag]: n / elapsed
-            for tag, n in counts.items()
-            if tag in tag_to_base
-        }
-        tables, measured = _existing()
-        tables[args.venue] = rates
-        measured[args.venue] = (
-            f"{datetime.now(UTC).date()} over {elapsed:.0f}s "
-            f"on one connection, {len(rates)} symbols"
-            + (f", depth {args.depth}" if args.venue == "kraken" else "")
-        )
-        _MODULE.write_text(_render(tables, measured))
-        print(f"\nwrote {_MODULE} ({len(rates)} symbols for {args.venue})")
+    if not args.write:
+        return 0
+    if not sum(counts.values()):
+        # A whole venue at zero is a rejected subscription, not a quiet market
+        # — Coinbase answers 188 products with `too many L2 streams requested
+        # in a single session` and then says nothing. Writing that would commit
+        # 188 zeros as if they were measurements, and the sharder would read
+        # them as free capacity.
+        print(f"\nrefusing to write: nothing heard from {args.venue} at all")
+        return 1
+    rates = {
+        tag_to_base[tag]: n / elapsed for tag, n in counts.items() if tag in tag_to_base
+    }
+    connections = (
+        1 if not args.per_connection else -(-len(symbols) // args.per_connection)
+    )
+    tables, measured = _existing()
+    tables[args.venue] = rates
+    measured[args.venue] = (
+        f"{datetime.now(UTC).date()} over {elapsed:.0f}s, {len(rates)} symbols "
+        f"across {connections} concurrent connection(s)"
+        + (f", depth {args.depth}" if args.venue == "kraken" else "")
+    )
+    _MODULE.write_text(_render(tables, measured))
+    print(f"\nwrote {_MODULE} ({len(rates)} symbols for {args.venue})")
     return 0
 
 
