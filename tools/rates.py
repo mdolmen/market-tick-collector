@@ -40,6 +40,7 @@ to catch. Both need a name in the output.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import time
 from collections.abc import Iterator, Mapping, Sequence
 from datetime import UTC, datetime
@@ -77,12 +78,16 @@ one window rather than of several.
 symbol count. A base missing from a venue's table has never been measured
 there; the sharder treats that as the set's median rather than as free, so a
 new listing cannot quietly land on the busiest socket.
+
+One venue is measured at a time and each is dated separately, because the
+rate is only comparable *within* a window. Nothing here licenses comparing a
+base's rate across venues — that is two markets, the same way
+`collector/symbols.py` says two quotes are two instruments.
 """
 
 from __future__ import annotations
 
 from typing import Final
-
 '''
 
 
@@ -159,15 +164,39 @@ def report(
         print(f"\nsilent ({len(silent)}): {', '.join(silent)}")
 
 
-def _render(venue_name: str, rates: Mapping[str, float], elapsed_s: float) -> str:
-    lines = [
-        _HEADER,
-        f"# {venue_name}: measured {datetime.now(UTC).date()} "
-        f"over {elapsed_s:.0f}s on one connection.",
-        f"{venue_name.upper()}: Final[dict[str, float]] = {{",
-    ]
-    for base, rate in sorted(rates.items(), key=lambda kv: (-kv[1], kv[0])):
-        lines.append(f'    "{base}": {rate:.4f},')
+def _existing() -> tuple[dict[str, dict[str, float]], dict[str, str]]:
+    """The committed tables and their provenance lines, or two empty dicts.
+
+    A venue at a time is the only way to measure — one connection, one window
+    — so writing has to merge rather than replace, or measuring Kraken would
+    silently delete Binance.
+    """
+    if not _MODULE.exists():
+        return {}, {}
+    spec = importlib.util.spec_from_file_location("collector._rates_current", _MODULE)
+    if spec is None or spec.loader is None:  # pragma: no cover — unreachable for a path
+        return {}, {}
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    rates = getattr(module, "RATES", {})
+    measured = getattr(module, "MEASURED", {})
+    return dict(rates), dict(measured)
+
+
+def _render(tables: Mapping[str, dict[str, float]], measured: Mapping[str, str]) -> str:
+    lines = [_HEADER, "RATES: Final[dict[str, dict[str, float]]] = {"]
+    for venue_name in sorted(tables):
+        lines.append(f"    # measured {measured.get(venue_name, 'date unknown')}")
+        lines.append(f'    "{venue_name}": {{')
+        table = tables[venue_name]
+        for base, rate in sorted(table.items(), key=lambda kv: (-kv[1], kv[0])):
+            lines.append(f'        "{base}": {rate:.4f},')
+        lines.append("    },")
+    lines.append("}")
+    lines.append("")
+    lines.append("MEASURED: Final[dict[str, str]] = {")
+    for venue_name in sorted(measured):
+        lines.append(f'    "{venue_name}": "{measured[venue_name]}",')
     lines.append("}")
     return "\n".join(lines) + "\n"
 
@@ -211,8 +240,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             for tag, n in counts.items()
             if tag in tag_to_base
         }
-        _MODULE.write_text(_render(args.venue, rates, elapsed))
-        print(f"\nwrote {_MODULE}")
+        tables, measured = _existing()
+        tables[args.venue] = rates
+        measured[args.venue] = (
+            f"{datetime.now(UTC).date()} over {elapsed:.0f}s "
+            f"on one connection, {len(rates)} symbols"
+            + (f", depth {args.depth}" if args.venue == "kraken" else "")
+        )
+        _MODULE.write_text(_render(tables, measured))
+        print(f"\nwrote {_MODULE} ({len(rates)} symbols for {args.venue})")
     return 0
 
 
