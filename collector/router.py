@@ -34,6 +34,7 @@ cannot name. `tests/test_boundary.py` enforces that.
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any, cast
 
 from data_pipeline_core import RunContext
@@ -42,6 +43,15 @@ from collector.adapters.base import VenueAdapter
 from collector.capture import CONTROL_STREAM, CaptureRecord, payload_of
 from collector.model import LevelRow
 from collector.transform import BookTransform
+
+
+@dataclass
+class Gate:
+    """One connection's sequence cursor, and the books that share its fate."""
+
+    adapter: VenueAdapter
+    books: tuple[BookTransform, ...]
+    prev: int | None = None
 
 
 class BookRouter:
@@ -58,21 +68,38 @@ class BookRouter:
     def __init__(
         self,
         books: Mapping[str, BookTransform],
+        routes: Mapping[str, BookTransform],
         sequencers: Sequence[VenueAdapter],
+        *,
+        gates: Mapping[str, Gate] | None = None,
+        shard_of: Mapping[str, str] | None = None,
     ) -> None:
+        # `books` is one entry per symbol and is what `summary` reports;
+        # `routes` may hold the same transform under several tags, because a
+        # venue whose snapshot arrives out of band lands it under one of its
+        # own. Two dicts rather than one so a book cannot be counted twice.
         self.books = dict(books)
+        self._routes = dict(routes)
         self._sequencers = tuple(sequencers)
+        # One gate per *connection*, present only where the venue numbers the
+        # connection rather than each book. See `_check_connection`.
+        self._gates = dict(gates or {})
+        self._shard_of = dict(shard_of or {})
         self.unrouted = 0
+        self.connection_gaps = 0
 
     def transform(self, record: CaptureRecord, ctx: RunContext) -> Iterator[LevelRow]:
         stream = record["stream"]
-        if stream == CONTROL_STREAM:
+        shard = self._shard_of.get(stream)
+        if shard is not None:
+            yield from self._check_connection(shard, record, ctx)
+        if stream.startswith(CONTROL_STREAM):
             # Connection-wide: no book, but it may occupy a sequence number.
             payload = payload_of(record)
             for sequencer in self._sequencers:
                 sequencer.advance(payload)
             return
-        book = self.books.get(stream)
+        book = self._routes.get(stream)
         if book is None:
             # A tag nobody subscribed to. Counted rather than dropped silently
             # or raised on: the capture is still the record of what arrived,
@@ -80,6 +107,40 @@ class BookRouter:
             self.unrouted += 1
             return
         yield from book.transform(record, ctx)
+
+    def _check_connection(
+        self, shard: str, record: CaptureRecord, ctx: RunContext
+    ) -> Iterator[LevelRow]:
+        """Continuity of one *connection*, judged on every record it carried.
+
+        This cannot live in a `BookTransform`, and that is the whole reason the
+        router owns it. A transform only sees its own symbol's records, so on a
+        venue that numbers the connection it cannot tell a lost message from a
+        neighbour simply having spoken. Worse, a book that is *buffering* never
+        calls `accept`, so a shared cursor would stall behind it and every
+        later message would look like a gap — measured on a live five-product
+        run: every book untrusted at exit.
+
+        **Per shard, not per run.** Two connections to the same venue have
+        entirely independent sequence spaces, so one gate across both reads as
+        a break on nearly every record — also measured, on the same run split
+        across three shards. A book record names its shard through its symbol;
+        an ack names it through `control_stream`.
+
+        On a break every book *on that connection* goes untrusted together,
+        because the sequence cannot say which product the missing message
+        described. That blast radius is real and is what `NOTES.md` sizes
+        Coinbase's shards against.
+        """
+        gate = self._gates[shard]
+        first, final = gate.adapter.sequence_ids(payload_of(record))
+        if gate.prev is not None and not gate.adapter.chains(gate.prev, first):
+            self.connection_gaps += 1
+            for book in gate.books:
+                book.adapter.sequence_broke(first)
+            for book in gate.books:
+                yield from book.mark_gapped(ctx, first)
+        gate.prev = final
 
     def summary(self) -> dict[str, Any]:
         """The shard's totals, plus the per-symbol detail that explains them.

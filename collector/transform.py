@@ -187,6 +187,27 @@ class BookTransform:
 
         yield from self._apply(event)
 
+    def mark_gapped(self, ctx: RunContext, seq: int) -> Iterator[LevelRow]:
+        """Something outside this book decided the stream lost a message.
+
+        The connection did, on a venue that numbers the connection rather than
+        each book: one lost message there could have been about any symbol on
+        the socket, so every book on it goes untrusted together. `BookRouter`
+        is what calls this, and `NOTES.md` § *Connection supervision* is where
+        that blast radius is the reason shards are sized.
+
+        Everything after the decision is the same as a gap this book found
+        itself — untrusted first, then repair, with both edges of the interval
+        in the data so convergence stays measurable.
+        """
+        if not self._live:
+            return
+        self.gaps += 1
+        ctx.logger.warning("gap on the connection", symbol=self.symbol, seq=seq)
+        self._live = False
+        self._buffered = []
+        yield self._gap_row_at(seq)
+
     def _try_bootstrap(self, ctx: RunContext) -> Iterator[LevelRow]:
         """Locate the snapshot inside the buffer, and bootstrap if it is there.
 
@@ -297,14 +318,34 @@ class BookTransform:
 
     def _gap_row(self, event: Update) -> LevelRow:
         """A control record: it describes no price level, so those fields are null."""
+        return self._gap_row_at(
+            event.first_seq,
+            exchange_ts=event.exchange_ts,
+            receive_ts=event.receive_ts,
+            monotonic_ts=event.monotonic_ts,
+        )
+
+    def _gap_row_at(
+        self,
+        seq: int,
+        *,
+        exchange_ts: int | None = None,
+        receive_ts: int = 0,
+        monotonic_ts: int = 0,
+    ) -> LevelRow:
+        """The same row, for a gap decided without an `Update` to hand.
+
+        A connection-level break is found by the router while inspecting a raw
+        payload, so there is no parsed event to take the clocks from.
+        """
         self.rows += 1
         return LevelRow(
             venue=self._adapter.venue,
             symbol=self.symbol,
-            seq=event.first_seq,
-            exchange_ts=event.exchange_ts,
-            receive_ts=event.receive_ts,
-            monotonic_ts=event.monotonic_ts,
+            seq=seq,
+            exchange_ts=exchange_ts,
+            receive_ts=receive_ts,
+            monotonic_ts=monotonic_ts,
             action="gap",
             side=None,
             price_str=None,
@@ -314,6 +355,16 @@ class BookTransform:
         )
 
     # --- the numbers -------------------------------------------------------
+
+    @property
+    def adapter(self) -> VenueAdapter:
+        """The sequencer this book judges itself by.
+
+        Exposed for `BookRouter`, which has to reach it on a connection-level
+        break: the break is found while inspecting a raw payload, so there is
+        no `Update` to carry the news in.
+        """
+        return self._adapter
 
     @property
     def book(self) -> Book:

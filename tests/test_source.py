@@ -86,7 +86,7 @@ def _run(
     http = _FakeHttp(payloads)
     ctx = RunContext.create(source_name="test", http=cast(HttpClient, http))
     source = FrameSource(
-        venue=BinanceAdapter(
+        venue=lambda: BinanceAdapter(
             depth_interval_ms=100,
             snapshot_limit=20,
             ws_url="wss://example.invalid/ws",
@@ -253,7 +253,7 @@ def test_a_rejected_subscription_fails_the_run_instead_of_going_quiet(
     )
     ctx = RunContext.create(source_name="test", http=cast(HttpClient, _FakeHttp([])))
     source = FrameSource(
-        venue=_QuietVenue(),
+        venue=_QuietVenue,
         symbols=["XBT/USD"],
         duration_s=0.2,
     )

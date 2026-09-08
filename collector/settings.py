@@ -38,6 +38,31 @@ class CollectorSettings(Settings):
     # See ``FrameSource._assert_the_subscription_took`` on why not at the end.
     subscribe_grace_s: float = 15.0
 
+    # --- sharding and supervision (Phase 3) ---------------------------------
+    #
+    # How long a shard's books may take to come back after a reconnect, and
+    # what one symbol costs to bring back. Together they set the shard size,
+    # bounded above by the venue's own cap — see ``collector/shard.py``. The
+    # per-symbol cost is zero until ``tools/recovery.py`` measures it, and the
+    # cap is then the only bound; that is a weaker plan and the shard planner
+    # is explicit about it rather than inventing a number.
+    recovery_budget_s: float = 5.0
+    per_symbol_recovery_s: float = 0.0
+
+    # Shard *i* opens at ``i * shard_stagger_s``, so a venue that force-closes
+    # a connection after a fixed lifetime never expires them all at once.
+    shard_stagger_s: float = 1.0
+
+    # Records buffered between the reader threads and the sink. A full queue
+    # drops rather than blocking a socket read — Phase 5 owns sizing this from
+    # a measurement, along with watermarks and whole-symbol shedding.
+    queue_maxsize: int = 10_000
+
+    # Reconnect each shard this often, break-before-make, to measure the
+    # recovery gap a venue's own forced close would cost. Zero disables it.
+    # 82800 is 23h, which is what a Binance production run would use.
+    rotate_after_s: float = 0.0
+
     # Binance's full-depth diff channel. 100ms rather than the 1000ms default:
     # volume is the reason this project exists.
     depth_interval_ms: int = 100

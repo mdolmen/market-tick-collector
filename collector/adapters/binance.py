@@ -263,6 +263,13 @@ class BinanceAdapter:
         self._snapshot_required = True
         return True
 
+    def sequence_broke(self, seq: int) -> None:
+        """A no-op: this venue numbers each book, not the connection.
+
+        A lost message is visible in *this* book's own sequence, so a
+        neighbour's break says nothing about it.
+        """
+
     def snapshot_required(self) -> bool:
         """Binance repairs a gap only by refetching the out-of-band snapshot.
 

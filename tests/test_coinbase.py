@@ -14,11 +14,13 @@ from typing import cast
 from data_pipeline_core import RunContext
 from data_pipeline_core.ingestion.http import HttpClient
 
+from collector.adapters import build_router
 from collector.adapters.base import BootstrapOutcome
 from collector.adapters.coinbase import CoinbaseAdapter, _ns
 from collector.capture import CaptureRecord
 from collector.model import LevelRow
 from collector.replay import FaultConfig, FaultInjector
+from collector.settings import CollectorSettings
 from collector.transform import BookTransform
 from tests.conftest import (
     coinbase_capture,
@@ -32,11 +34,23 @@ _SNAPSHOT_EVERY = 10
 _STREAM = "level2:BTC-USD"
 
 
-def _run(records: list[CaptureRecord]) -> tuple[list[LevelRow], BookTransform]:
-    transform = BookTransform(symbol="BTC-USD", adapter=CoinbaseAdapter())
+def _run(
+    records: list[CaptureRecord], products: tuple[str, ...] = ("BTC-USD",)
+) -> tuple[list[LevelRow], BookTransform]:
+    """Through a `BookRouter`, because continuity here is the connection's.
+
+    `sequence_num` counts every message on the socket, so no single book can
+    tell a lost message from a neighbour having spoken — and a book that is
+    buffering never advances the cursor at all. The router watches every record
+    and is the only thing that can judge it, which is why even a one-product
+    Coinbase connection needs one. Returns the first product's book, which is
+    what every assertion below is about.
+    """
+    settings = CollectorSettings(venue="coinbase", symbols=",".join(products))
+    router, _ = build_router(settings, [products])
     ctx = RunContext.create(source_name="test", http=cast(HttpClient, None))
-    rows = [row for record in records for row in transform.transform(record, ctx)]
-    return rows, transform
+    rows = [row for record in records for row in router.transform(record, ctx)]
+    return rows, router.books[f"level2:{products[0]}"]
 
 
 def _session() -> list[CaptureRecord]:
@@ -155,12 +169,13 @@ def test_a_snapshot_from_before_a_gap_is_refused_rather_than_used() -> None:
     """The bug that produced crossed books: the transform keeps the last
     snapshot it saw, and a gap much later must not rebuild from it.
 
-    Driven through `gap_detected` rather than by handing `bootstrap` a distant
-    pair directly. Until Phase 3 the rule was sequence adjacency, so any gap in
-    the numbers looked stale and constructing one by hand was enough. It is now
-    "did the connection break after this snapshot", which is what adjacency was
-    standing in for and is the only version that survives several products on
-    one socket — so the test has to actually break the connection.
+    Driven through `sequence_broke` rather than by handing `bootstrap` a
+    distant pair directly. Until Phase 3 the rule was sequence adjacency, so
+    any gap in the numbers looked stale and constructing one by hand was
+    enough. It is now "did the connection break after this snapshot", which is
+    what adjacency was standing in for and is the only version that survives
+    several products on one socket — so the test has to actually break the
+    connection, and only something watching the whole connection can.
     """
     adapter = CoinbaseAdapter()
     snapshot = adapter.parse_snapshot(
@@ -171,7 +186,9 @@ def test_a_snapshot_from_before_a_gap_is_refused_rather_than_used() -> None:
         coinbase_frame(sequence=500, index=0), receive_ts=0, monotonic_ts=0
     )
 
-    assert adapter.gap_detected(update), "490 missing messages is a gap"
+    adapter.sequence_broke(update.first_seq)  # 490 missing messages
+
+    assert adapter.snapshot_required()
     assert adapter.bootstrap([update], snapshot).outcome is (
         BootstrapOutcome.SNAPSHOT_TOO_OLD
     )

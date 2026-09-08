@@ -295,19 +295,28 @@ class CoinbaseAdapter:
         self._snapshot_required = False
 
     def in_sequence(self, update: Update) -> bool:
-        if self._prev_seq is None:
-            return True
-        return self.chains(self._prev_seq, update.first_seq)
+        """Always true: continuity here is the *connection's*, not this book's.
+
+        `sequence_num` counts every message on the socket, so this book's
+        frames are not adjacent to each other whenever anything else shares
+        the connection — and a book that is buffering never advances the
+        cursor at all, which would strand it. Only something watching every
+        message can judge continuity, which is what `sequence_broke` is for.
+        """
+        return True
 
     def gap_detected(self, update: Update) -> bool:
-        if self.in_sequence(update):
-            return False
+        """Never from this book alone; see `in_sequence`."""
+        return False
+
+    def sequence_broke(self, seq: int) -> None:
+        """The connection lost a message at `seq`, so this book is untrusted.
+
+        `seq` is what `snapshot_stale` judges a snapshot's age against:
+        everything numbered at or before the break was still followed.
+        """
         self._snapshot_required = True
-        # Where the continuity broke, which is what `snapshot_stale` judges a
-        # snapshot's age against. Recorded at the *update that revealed* the
-        # break: everything numbered at or before it was still followed.
-        self._last_break_seq = update.first_seq
-        return True
+        self._last_break_seq = seq
 
     def snapshot_required(self) -> bool:
         """Repaired by a resubscribe, since the venue sends no snapshot unasked."""

@@ -17,7 +17,7 @@ from typing import Any, cast
 import pytest
 
 from collector.adapters import binance
-from collector.capture import CONTROL_STREAM, CaptureRecord, Kind
+from collector.capture import CaptureRecord, Kind, control_stream
 
 _FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -233,6 +233,9 @@ def coinbase_capture(
     if snapshot_every > 0:
         positions |= set(range(snapshot_every, count, snapshot_every))
 
+    # Control traffic names the connection it arrived on, exactly as
+    # `FrameSource` tags it — the shard is the first symbol on it.
+    control = control_stream(products[0].upper())
     records: list[CaptureRecord] = []
     sequence = 0
 
@@ -255,10 +258,10 @@ def coinbase_capture(
         for product in products:
             stream = f"level2:{product}"
             if index in positions:
-                append("control", coinbase_control(sequence), CONTROL_STREAM)
+                append("control", coinbase_control(sequence), control)
                 append("snapshot", _cb_at(coinbase_snapshot(sequence), product), stream)
             if index == ack_before:
-                append("control", coinbase_control(sequence), CONTROL_STREAM)
+                append("control", coinbase_control(sequence), control)
             append("frame", _cb_at(coinbase_frame(sequence, index), product), stream)
     return records
 
@@ -397,13 +400,14 @@ def kraken_capture(
         positions |= set(range(snapshot_every, count, snapshot_every))
 
     session = KrakenSession(symbol)
+    control = control_stream(symbol.upper())
     records: list[CaptureRecord] = []
 
-    def append(kind: Kind, payload: dict[str, Any]) -> None:
+    def append(kind: Kind, payload: dict[str, Any], stream: str = "") -> None:
         seq = len(records) + 1
         records.append(
             CaptureRecord(
-                stream=f"book:{symbol}",
+                stream=stream or f"book:{symbol}",
                 kind=kind,
                 seq=seq,
                 receive_ts=1_700_000_000_000_000_000 + seq * _STEP_NS,
@@ -414,7 +418,7 @@ def kraken_capture(
 
     for index in range(count):
         if index in positions:
-            append("control", kraken_control(index))
+            append("control", kraken_control(index), control)
             append("snapshot", session.snapshot(index))
         append("frame", session.update(index))
     return records

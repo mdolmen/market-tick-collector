@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -49,7 +49,7 @@ from data_pipeline_core import RunContext
 from websockets.sync.client import ClientConnection, connect
 
 from collector.adapters.base import Venue
-from collector.capture import CONTROL_STREAM, CaptureRecord, Kind, decode
+from collector.capture import CaptureRecord, Kind, control_stream, decode
 
 # A refetch that keeps landing behind the buffer means something is wrong with
 # the venue or the clock, not with our patience. Fail the run rather than spin.
@@ -113,24 +113,46 @@ class FrameSource:
     def __init__(
         self,
         *,
-        venue: Venue,
+        venue: Callable[[], Venue],
         symbols: Sequence[str],
         duration_s: float,
         snapshot_interval_s: float = 0.0,
         subscribe_grace_s: float = _SUBSCRIBE_GRACE_S,
     ) -> None:
-        self._venue = venue
+        """`venue` is a *factory*, because a shard needs more than one.
+
+        One instance is the transport — the URL, the subscribe frames — and is
+        stateless. The others are sequencers, one per `sequence_key`, and they
+        are emphatically not: Kraken keeps an ordered top-ten view per book to
+        recompute the venue's CRC32 over, and Coinbase keeps the connection's
+        cursor. Sharing one across a shard mixes two books into one checksum
+        view, which fails on every message and asks for a repair that cannot
+        help. That was a live-run failure, not a hypothetical:
+        `snapshot for DOGE/USD still behind the stream after 6 refetches`.
+
+        It generalises the rule `adapters/base.py` already states — the source
+        and the transform each hold their own instance because they ask
+        different questions of one venue rule. A shard just makes "their own"
+        mean one per sequence rather than one per process.
+        """
+        self._venue = venue()
         self.symbols = tuple(dict.fromkeys(symbol.upper() for symbol in symbols))
         if not self.symbols:
             raise ValueError("a shard needs at least one symbol")
-        self.name = f"{venue.venue}-depth"
+        # Names this connection in the tag its control traffic lands under, so
+        # a run with several shards can tell their sequences apart. The first
+        # symbol is stable, unique across a plan (a symbol is on one shard) and
+        # already in the capture, so it costs no new identifier.
+        self.shard_id = self.symbols[0]
+        self._control_stream = control_stream(self.shard_id)
+        self.name = f"{self._venue.venue}-depth"
         self._duration_s = duration_s
         self._snapshot_interval_s = snapshot_interval_s
         self._subscribe_grace_s = subscribe_grace_s
         # Tag to symbol, which is the direction the receive path needs:
         # ``stream_of`` hands back a tag and the state is keyed by symbol.
-        self._symbol_of = {venue.stream_tag(s): s for s in self.symbols}
-        self._requests = {s: venue.snapshot_request(s) for s in self.symbols}
+        self._symbol_of = {self._venue.stream_tag(s): s for s in self.symbols}
+        self._requests = {s: self._venue.snapshot_request(s) for s in self.symbols}
         # A venue's snapshot arrives out of band or in band; it is a property
         # of the venue, so asking any one symbol answers for the shard.
         self._out_of_band = self._requests[self.symbols[0]] is not None
@@ -139,8 +161,14 @@ class FrameSource:
         # numbers the connection every symbol maps to the same entry and the
         # dict collapses to a single state. No branch here says which — the
         # aliasing is the venue's answer. See ``VenueAdapter.sequence_key``.
-        self._keys = {symbol: venue.sequence_key(symbol) for symbol in self.symbols}
+        self._keys = {
+            symbol: self._venue.sequence_key(symbol) for symbol in self.symbols
+        }
         self._states = {key: _SymbolState() for key in self._keys.values()}
+        # One sequencer per key, alongside the state it owns. A venue that
+        # numbers the connection collapses to a single entry, exactly as the
+        # state does, because it is the same key.
+        self._sequencers = {key: venue() for key in self._states}
         # Book messages seen per *symbol*, which is a different question from
         # the sequence and stays per-symbol even where the sequence does not.
         # It answers "did this subscription take", and on a connection-scoped
@@ -326,11 +354,11 @@ class FrameSource:
             # something we did not ask for. Landed under its own tag rather
             # than attributed to a symbol, so the capture stays honest.
             symbol = self._symbol_of.get(stream) if stream is not None else None
-            kind = self._venue.classify(stream or CONTROL_STREAM, payload)
+            kind = self._venue.classify(stream or self._control_stream, payload)
             self._track(kind, payload, symbol)
             return (
                 self._record(
-                    stream=stream or CONTROL_STREAM,
+                    stream=stream or self._control_stream,
                     kind=kind,
                     receive_ts=receive_ts,
                     monotonic_ts=monotonic_ts,
@@ -354,23 +382,25 @@ class FrameSource:
             # is no symbol on a control message, so this moves every distinct
             # cursor — which is one of them on the only venue that numbers
             # control, and on the others is the cursor's own current value.
-            for state in self._states.values():
-                state.prev_final_seq = self._venue.sequence_ids(payload)[1]
+            for key, state in self._states.items():
+                state.prev_final_seq = self._sequencers[key].sequence_ids(payload)[1]
             return
         if symbol is None:
             return
-        state = self._states[self._keys[symbol]]
+        key = self._keys[symbol]
+        state = self._states[key]
+        sequencer = self._sequencers[key]
         self._heard[symbol] += 1
         if kind == "snapshot":
-            self._venue.observe(payload)
-            state.snapshot_seq = self._venue.snapshot_seq(payload)
+            sequencer.observe(payload)
+            state.snapshot_seq = sequencer.snapshot_seq(payload)
             state.first_seq_since_snapshot = None
             state.last_snapshot_at = time.monotonic()
             # An in-band snapshot occupies a sequence number of its own, so it
             # moves the cursor. Without this the frame after every snapshot
             # fails the chain rule, which asks for another snapshot, which is a
             # resubscribe loop — 42 of them in a 25s run before this line.
-            state.prev_final_seq = self._venue.snapshot_seq(payload)
+            state.prev_final_seq = sequencer.snapshot_seq(payload)
             state.skipped = False
             return
         # Two ways one frame can tell this class the stream broke, and a venue
@@ -380,11 +410,11 @@ class FrameSource:
         # trivially true, so without this the source would never ask for a
         # repair and the capture would carry no snapshot at the one point a
         # replay needs one.
-        consistent = self._venue.observe(payload)
-        first_seq, final_seq = self._venue.sequence_ids(payload)
+        consistent = sequencer.observe(payload)
+        first_seq, final_seq = sequencer.sequence_ids(payload)
         # Judged against the *previous* frame, so it has to happen before the
         # cursor moves.
-        broke_chain = state.prev_final_seq is not None and not self._venue.chains(
+        broke_chain = state.prev_final_seq is not None and not sequencer.chains(
             state.prev_final_seq, first_seq
         )
         state.skipped = broke_chain or not consistent
@@ -418,14 +448,15 @@ class FrameSource:
         fetch window for updates to be lost in — so only the skip and the
         interval can fire, and both resolve to a resubscribe.
         """
-        state = self._states[self._keys[symbol]]
+        key = self._keys[symbol]
+        state = self._states[key]
         if state.first_seq_since_snapshot is None:
             return False
         if state.snapshot_seq is None:
             # In band, the venue sends it unasked and this must not pre-empt
             # it; out of band, nobody else will.
             return self._out_of_band
-        if self._venue.snapshot_stale(
+        if self._sequencers[key].snapshot_stale(
             state.first_seq_since_snapshot, state.snapshot_seq
         ):
             state.refetches += 1
@@ -489,9 +520,10 @@ class FrameSource:
         if response.status_code != 200:
             raise RuntimeError(f"depth snapshot returned {response.status_code}")
         payload: dict[str, Any] = response.json()
-        state = self._states[self._keys[symbol]]
+        key = self._keys[symbol]
+        state = self._states[key]
         self._heard[symbol] += 1
-        state.snapshot_seq = self._venue.snapshot_seq(payload)
+        state.snapshot_seq = self._sequencers[key].snapshot_seq(payload)
         state.first_seq_since_snapshot = None
         state.last_snapshot_at = time.monotonic()
         return self._record(

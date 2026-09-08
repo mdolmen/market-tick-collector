@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from functools import partial
 from typing import Any, cast
 
 import pytest
@@ -30,7 +31,7 @@ from websockets.exceptions import ConnectionClosedError
 
 from collector import source as source_module
 from collector.adapters.kraken import KrakenAdapter
-from collector.capture import CONTROL_STREAM, CaptureRecord
+from collector.capture import CONTROL_STREAM, CaptureRecord, control_stream
 from collector.source import FrameSource
 from collector.supervisor import ShardSupervisor
 from tests.conftest import kraken_capture
@@ -115,7 +116,7 @@ def _supervisor(
     monkeypatch.setattr(source_module, "connect", _Factory(scripts), raising=True)
     sources = [
         FrameSource(
-            venue=KrakenAdapter(depth=10, ws_url=_url(shard[0])),
+            venue=partial(KrakenAdapter, depth=10, ws_url=_url(shard[0])),
             symbols=shard,
             duration_s=duration_s,
             subscribe_grace_s=duration_s * 10,  # never fires inside the test
@@ -150,13 +151,16 @@ def test_every_shard_lands_its_own_symbol(monkeypatch: pytest.MonkeyPatch) -> No
     supervisor, records = _supervisor(monkeypatch, scripts)
 
     landed = _by_stream(records)
-    assert {s for s in landed if s != CONTROL_STREAM} == {
+    assert {s for s in landed if not s.startswith(CONTROL_STREAM)} == {
         f"book:{s[0]}" for s in _SHARDS
     }
     # Kraken's heartbeat belongs to the connection and to no book, so it lands
-    # under its own tag rather than being attributed to whichever symbol the
-    # shard happens to carry.
-    assert CONTROL_STREAM in landed
+    # under a tag naming that connection rather than being attributed to
+    # whichever symbol the shard happens to carry. One tag per shard, because
+    # two connections' sequences are unrelated.
+    assert {s for s in landed if s.startswith(CONTROL_STREAM)} == {
+        control_stream(s[0]) for s in _SHARDS
+    }
     assert supervisor.dropped == 0
     assert supervisor.reconnects == 0
     # One total order across shards, stamped on the drain.
@@ -219,7 +223,9 @@ def test_a_full_queue_drops_and_latches_a_repair(
 def test_a_dropped_record_marks_its_symbol_for_repair() -> None:
     """The `dropped` hook on its own, without the timing of a real overflow."""
     source = FrameSource(
-        venue=KrakenAdapter(depth=10), symbols=["BTC/USD"], duration_s=1.0
+        venue=partial(KrakenAdapter, depth=10),
+        symbols=["BTC/USD"],
+        duration_s=1.0,
     )
     state = source._states[source._keys["BTC/USD"]]
     assert not state.skipped
@@ -232,7 +238,9 @@ def test_a_dropped_record_marks_its_symbol_for_repair() -> None:
 
 def test_a_dropped_record_for_an_unknown_stream_is_ignored() -> None:
     source = FrameSource(
-        venue=KrakenAdapter(depth=10), symbols=["BTC/USD"], duration_s=1.0
+        venue=partial(KrakenAdapter, depth=10),
+        symbols=["BTC/USD"],
+        duration_s=1.0,
     )
     source.dropped("book:NOPE/USD")  # must not raise
 

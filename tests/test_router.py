@@ -46,7 +46,7 @@ def _sides(book: Book) -> tuple[dict[int, int], dict[int, int]]:
 
 def _drive_router(records: list[CaptureRecord], products: tuple[str, ...]) -> object:
     settings = CollectorSettings(venue="coinbase", symbols=",".join(products))
-    router, _ = build_router(settings, products)
+    router, _ = build_router(settings, [products])
     for record in records:
         for _ in router.transform(record, _ctx()):
             pass
@@ -101,7 +101,9 @@ def test_control_traffic_advances_the_cursor_without_reaching_a_book() -> None:
     records = coinbase_capture(
         count=30, snapshot_every=10, ack_before=12, products=_PRODUCTS
     )
-    assert any(r["stream"] == "control" for r in records), "the ack must be tagged"
+    assert any(r["stream"].startswith("control:") for r in records), (
+        "the ack must be tagged with the connection it arrived on"
+    )
 
     router = _drive_router(records, _PRODUCTS)
     summary = router.summary()  # type: ignore[attr-defined]

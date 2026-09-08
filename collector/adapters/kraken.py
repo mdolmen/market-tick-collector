@@ -479,6 +479,13 @@ class KrakenAdapter:
         """
         return self._snapshot_required
 
+    def sequence_broke(self, seq: int) -> None:
+        """A no-op: the CRC32 is over this book alone.
+
+        A neighbour's break says nothing about whether this book still
+        matches the venue's checksum, which is the only thing that can.
+        """
+
     def snapshot_required(self) -> bool:
         """Repaired by a resubscribe, since the venue sends no snapshot unasked."""
         return self._snapshot_required

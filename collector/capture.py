@@ -39,13 +39,35 @@ from typing import Any, Literal, TypedDict
 
 Kind = Literal["frame", "snapshot", "control"]
 
-# The `stream` a message about the connection rather than about any one book
-# carries — a subscribe ack, a heartbeat, a status frame. One symbol per socket
-# had no need for it: every record could take that symbol's tag, because there
-# was only one. A shard has many, and attributing an ack to whichever book
+# The `stream` prefix a message about the connection rather than about any one
+# book carries — a subscribe ack, a heartbeat, a status frame. One symbol per
+# socket had no need for it: every record could take that symbol's tag, because
+# there was only one. A shard has many, and attributing an ack to whichever book
 # happened to be first would move that book's cursor for a message that was
 # never about it. Venue-neutral, like everything else in this module.
 CONTROL_STREAM = "control"
+
+
+def control_stream(shard_id: str) -> str:
+    """The tag for connection-wide traffic on one particular connection.
+
+    **The shard has to be in the tag**, and it is the one place a record says
+    which connection it came from. On a venue that numbers the *connection* —
+    Coinbase counts every message on the socket, acks included — continuity is
+    judged per connection, and two shards of the same venue have entirely
+    independent sequence spaces. A book record carries its symbol and the
+    symbol names its shard, so those route themselves; an ack names nothing.
+    Landing every shard's acks under one tag makes a run with several shards
+    interleave three unrelated sequences into one, which reads as a break on
+    almost every record. Measured: a five-product Coinbase run across three
+    shards reported a gap on every book and none of them recovered.
+
+    A new *value* of an existing field, not a new field — the same way
+    `rest:depth:{symbol}` extended the snapshot tag — so nothing about the
+    landed format changes and an older capture still replays.
+    """
+    return f"{CONTROL_STREAM}:{shard_id}"
+
 
 # **The decoder never produces a float.** ``parse_float=str`` hands back the
 # venue's own source token instead of a float, everywhere, for every venue.

@@ -299,6 +299,26 @@ class VenueAdapter(Protocol):
         """The inverse, and it latches `snapshot_required`."""
         ...
 
+    def sequence_broke(self, seq: int) -> None:
+        """Something watching the whole connection says a message was lost.
+
+        Only meaningful where continuity is a property of the *connection*
+        rather than of each book — Coinbase, whose `sequence_num` counts every
+        message on the socket. There, one lost message could have been about
+        any symbol on it, so every book on that connection is untrusted and
+        `BookRouter` says so by calling this on each.
+
+        A **no-op** on a venue that numbers each book independently, which is
+        both of the other two: they detect their own breaks from their own
+        sequence or their own checksum, and nothing about a neighbour's stream
+        tells them anything.
+
+        It is the counterpart of `sequence_key`. That one says whose sequence a
+        symbol shares; this one is how a break in a shared sequence reaches the
+        books that share it.
+        """
+        ...
+
     def snapshot_required(self) -> bool:
         """Whether the book needs a fresh snapshot before it can be trusted.
 
