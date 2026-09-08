@@ -283,7 +283,7 @@ class FrameSource:
             self._report(ctx, time.monotonic() - started)
 
     def _assert_the_subscription_took(self, ctx: RunContext) -> None:
-        """Symbols that never sent a book message did not subscribe.
+        """A shard that heard nothing at all did not subscribe.
 
         Venue-neutral on purpose, because the way this goes wrong is not.
         Phase 2.5 subscribed Kraken to ``XBT/USD`` — the spelling
@@ -296,31 +296,48 @@ class FrameSource:
 
         A rejected subscription looks different on every venue and is a
         different shape again on each, so matching the ack would be three
-        venue-specific parsers. Not receiving a single book message in the
-        grace is the one symptom they share, and it is not something a working
-        subscription does — even an illiquid symbol gets the in-band snapshot,
-        and an out-of-band venue gets the REST one.
+        venue-specific parsers. Hearing nothing at all is the one symptom they
+        share, and it is not something a working subscription does.
 
         **Checked once, shortly after subscribing, rather than at the end.**
         Phase 2.5 raised this at the deadline, which was free when a run was
         one symbol: nothing had been landed yet, because ``WorkerApp`` calls
         ``Sink.write`` once and ``raw_landing_sink`` writes one file at the end
-        of it. At shard scale that is the opposite of free — one misspelled
-        ticker in a batch of fifty would throw away a ten-minute capture of the
-        other forty-nine. A rejection is answered within a second or two, so
-        the grace window catches it just as reliably and costs nothing.
+        of it. At shard scale that is the opposite of free — one bad subscribe
+        would throw away a ten-minute capture. A rejection is answered within a
+        second or two, so the grace window catches it just as reliably.
 
-        Silence *after* the grace window is not an error: an illiquid symbol
-        that has already sent its snapshot is entitled to say nothing more.
+        **The shard, not each symbol on it, and that is a correction.** This
+        first asked every symbol to have spoken by the grace point, which the
+        rate table then disproved: the quietest measured symbols run at 0.16
+        msg/s on Binance and 0.03 on Coinbase — one message every six seconds
+        and every half minute. Worse, an out-of-band venue fetches a symbol's
+        first snapshot only once its first frame arrives, so a quiet symbol
+        produces *nothing* until it trades. A 188-symbol Binance capture died
+        23 seconds into a four-minute run with all seven shards raising, and
+        landed 70 records.
+
+        So silence per symbol is reported and never fatal, and only a shard
+        that heard nothing whatsoever fails the run. A batched subscribe is
+        accepted or rejected as a whole on every venue here, which is what
+        makes the shard the right unit to check.
         """
-        silent = sorted(symbol for symbol, heard in self._heard.items() if not heard)
-        if not silent:
+        heard = sum(self._heard.values())
+        silent = sorted(symbol for symbol, count in self._heard.items() if not count)
+        if heard:
+            if silent:
+                # Expected on an illiquid symbol inside a short window, and the
+                # only evidence available if one was quietly dropped. Named
+                # either way; the run is the wrong place to decide which.
+                ctx.logger.info(
+                    "symbols still silent", venue=self._venue.venue, symbols=silent
+                )
             return
         raise RuntimeError(
-            f"no book message for {len(silent)} of {len(self.symbols)} symbol(s) "
-            f"in {self._subscribe_grace_s:.0f}s on {self._venue.venue} "
+            f"no book message at all on {self._venue.venue} in "
+            f"{self._subscribe_grace_s:.0f}s across {len(self.symbols)} symbol(s) "
             f"({self._control} control record(s)) — the subscription was almost "
-            f"certainly rejected; check the venue's spelling of {silent!r}"
+            f"certainly rejected; check the venue's spelling of {list(self.symbols)!r}"
         )
 
     def _resubscribe(self, ws: ClientConnection, ctx: RunContext, symbol: str) -> None:

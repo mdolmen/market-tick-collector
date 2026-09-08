@@ -329,3 +329,48 @@ def test_a_silent_socket_is_reconnected_rather_than_waited_out(
 
     assert supervisor.reconnects >= 1, "silence must force a reconnect"
     assert supervisor.failures[0] >= 1
+
+
+def test_a_quiet_symbol_does_not_fail_the_shard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Silence per symbol is reported, never fatal.
+
+    The measured rate table has symbols at 0.16 msg/s on Binance and 0.03 on
+    Coinbase — one message every six seconds and every half minute — so a
+    symbol saying nothing inside a grace window is an illiquid market, not a
+    rejected subscription. Demanding otherwise killed all seven shards of a
+    188-symbol Binance capture 23 seconds into a four-minute run.
+    """
+    # Only BTC speaks; the other two symbols on the shard stay silent.
+    scripts = {"BTC/USD": [_Script(_messages("BTC/USD", 6))]}
+    monkeypatch.setattr(source_module, "connect", _Factory(scripts), raising=True)
+    source = FrameSource(
+        venue=partial(KrakenAdapter, depth=10, ws_url=_url("BTC/USD")),
+        symbols=["BTC/USD", "ETH/USD", "SOL/USD"],
+        duration_s=0.5,
+        subscribe_grace_s=0.05,
+    )
+    ctx = RunContext.create(source_name="test", http=cast(HttpClient, None))
+
+    records = list(source.fetch(ctx))
+
+    assert records, "the shard heard something, so it must not raise"
+
+
+def test_a_shard_that_hears_nothing_at_all_still_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Phase 2.5 signal, preserved exactly: a whole subscription rejected."""
+    scripts = {"BTC/USD": [_Script([json.dumps({"error": "nope", "success": False})])]}
+    monkeypatch.setattr(source_module, "connect", _Factory(scripts), raising=True)
+    source = FrameSource(
+        venue=partial(KrakenAdapter, depth=10, ws_url=_url("BTC/USD")),
+        symbols=["BTC/USD", "ETH/USD"],
+        duration_s=0.5,
+        subscribe_grace_s=0.05,
+    )
+    ctx = RunContext.create(source_name="test", http=cast(HttpClient, None))
+
+    with pytest.raises(RuntimeError, match="no book message at all"):
+        list(source.fetch(ctx))
