@@ -9,7 +9,6 @@ perturbs `CaptureRecord`s and has never heard of either venue.
 
 from __future__ import annotations
 
-import json
 from typing import cast
 
 from data_pipeline_core import RunContext
@@ -21,7 +20,12 @@ from collector.capture import CaptureRecord
 from collector.model import LevelRow
 from collector.replay import FaultConfig, FaultInjector
 from collector.transform import BookTransform
-from tests.conftest import coinbase_capture, coinbase_control, coinbase_frame
+from tests.conftest import (
+    coinbase_capture,
+    coinbase_control,
+    coinbase_frame,
+    coinbase_snapshot,
+)
 
 _FRAMES = 60
 _SNAPSHOT_EVERY = 10
@@ -147,22 +151,55 @@ def test_a_lost_ack_is_detected_like_any_other_lost_message() -> None:
 # --- the fault battery, unchanged from Binance ------------------------------
 
 
-def test_a_stale_snapshot_is_refused_rather_than_used() -> None:
+def test_a_snapshot_from_before_a_gap_is_refused_rather_than_used() -> None:
     """The bug that produced crossed books: the transform keeps the last
-    snapshot it saw, and a gap much later must not rebuild from it."""
+    snapshot it saw, and a gap much later must not rebuild from it.
+
+    Driven through `gap_detected` rather than by handing `bootstrap` a distant
+    pair directly. Until Phase 3 the rule was sequence adjacency, so any gap in
+    the numbers looked stale and constructing one by hand was enough. It is now
+    "did the connection break after this snapshot", which is what adjacency was
+    standing in for and is the only version that survives several products on
+    one socket — so the test has to actually break the connection.
+    """
     adapter = CoinbaseAdapter()
+    snapshot = adapter.parse_snapshot(
+        coinbase_snapshot(sequence=10), receive_ts=0, monotonic_ts=0
+    )
+    adapter.bootstrapped(snapshot)
     update = adapter.parse_frame(
         coinbase_frame(sequence=500, index=0), receive_ts=0, monotonic_ts=0
     )
-    snapshot = adapter.parse_snapshot(
-        json.loads(json.dumps(coinbase_frame(sequence=10, index=0))),
-        receive_ts=0,
-        monotonic_ts=0,
+
+    assert adapter.gap_detected(update), "490 missing messages is a gap"
+    assert adapter.bootstrap([update], snapshot).outcome is (
+        BootstrapOutcome.SNAPSHOT_TOO_OLD
     )
 
-    result = adapter.bootstrap([update], snapshot)
 
-    assert result.outcome is BootstrapOutcome.SNAPSHOT_TOO_OLD
+def test_a_snapshot_is_not_stale_merely_because_others_share_the_socket() -> None:
+    """The Phase 3 finding, as the complement of the test above.
+
+    With several products on one connection a product's own next frame is
+    several `sequence_num` past its snapshot with nothing missing at all —
+    measured 2026-09-08, three products, 5802 messages, no break. Under the old
+    adjacency rule that read as stale, and every book on a multiplexed
+    connection was permanently `SNAPSHOT_TOO_OLD`.
+    """
+    adapter = CoinbaseAdapter()
+    snapshot = adapter.parse_snapshot(
+        coinbase_snapshot(sequence=10), receive_ts=0, monotonic_ts=0
+    )
+    adapter.bootstrapped(snapshot)
+    # Two other products spoke in between, so this product's next frame is 13.
+    for sequence in (11, 12, 13):
+        update = adapter.parse_frame(
+            coinbase_frame(sequence=sequence, index=0), receive_ts=0, monotonic_ts=0
+        )
+        assert not adapter.gap_detected(update)
+        adapter.accept(update)
+
+    assert adapter.bootstrap([update], snapshot).outcome is BootstrapOutcome.READY
 
 
 def test_a_dropped_run_is_detected_and_the_book_reconverges() -> None:

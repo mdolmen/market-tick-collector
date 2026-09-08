@@ -32,6 +32,8 @@ DOWNSTREAM = (
     "capture.py",
     "replay.py",
     "source.py",
+    "router.py",
+    "shard.py",
 )
 
 # `collector.adapters` itself resolves a venue name to a venue: it is the one

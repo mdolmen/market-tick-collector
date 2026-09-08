@@ -10,13 +10,14 @@ from __future__ import annotations
 
 import json
 import zlib
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
 
 from collector.adapters import binance
-from collector.capture import CaptureRecord, Kind
+from collector.capture import CONTROL_STREAM, CaptureRecord, Kind
 
 _FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -203,9 +204,13 @@ def _cb_book(
 
 
 def coinbase_capture(
-    *, count: int, snapshot_every: int = 0, ack_before: int | None = None
+    *,
+    count: int,
+    snapshot_every: int = 0,
+    ack_before: int | None = None,
+    products: Sequence[str] = (_CB_SYMBOL,),
 ) -> list[CaptureRecord]:
-    """``count`` frames, with an ack-then-snapshot pair at 0 and every ``n``.
+    """``count`` frames per product, with an ack-then-snapshot pair at 0 and ``n``.
 
     The ack before each snapshot is what a resubscribe actually looks like on
     the wire, and it is there so the tests exercise a control record sitting
@@ -215,6 +220,14 @@ def coinbase_capture(
     from any snapshot. Losing an ack next to a snapshot is undetectable and
     should be — the snapshot re-establishes the cursor either way — so it takes
     a lone one to show that the sequence covers control traffic at all.
+
+    ``products`` round-robins several products over **one shared
+    `sequence_num`**, which is what the venue actually sends: measured
+    2026-09-08 over a 120s three-product subscribe, 5802 messages numbered
+    0 → 5801 with no break and one `events` entry each. Merging two separately
+    built single-product captures would instead produce two interleaved
+    sequences, which is a stream no live connection can emit — and it is
+    precisely the shape that hides the bug this builder exists to expose.
     """
     positions = {0}
     if snapshot_every > 0:
@@ -223,12 +236,12 @@ def coinbase_capture(
     records: list[CaptureRecord] = []
     sequence = 0
 
-    def append(kind: Kind, payload: dict[str, Any]) -> None:
+    def append(kind: Kind, payload: dict[str, Any], stream: str) -> None:
         nonlocal sequence
         seq = len(records) + 1
         records.append(
             CaptureRecord(
-                stream=_CB_STREAM,
+                stream=stream,
                 kind=kind,
                 seq=seq,
                 receive_ts=1_700_000_000_000_000_000 + seq * _STEP_NS,
@@ -239,13 +252,21 @@ def coinbase_capture(
         sequence += 1
 
     for index in range(count):
-        if index in positions:
-            append("control", coinbase_control(sequence))
-            append("snapshot", coinbase_snapshot(sequence))
-        if index == ack_before:
-            append("control", coinbase_control(sequence))
-        append("frame", coinbase_frame(sequence, index))
+        for product in products:
+            stream = f"level2:{product}"
+            if index in positions:
+                append("control", coinbase_control(sequence), CONTROL_STREAM)
+                append("snapshot", _cb_at(coinbase_snapshot(sequence), product), stream)
+            if index == ack_before:
+                append("control", coinbase_control(sequence), CONTROL_STREAM)
+            append("frame", _cb_at(coinbase_frame(sequence, index), product), stream)
     return records
+
+
+def _cb_at(payload: dict[str, Any], product: str) -> dict[str, Any]:
+    """The same message, relabelled for one product."""
+    events = [{**event, "product_id": product} for event in payload["events"]]
+    return {**payload, "events": events}
 
 
 # --- Kraken ----------------------------------------------------------------

@@ -12,11 +12,15 @@ place in the project that names them all. Everything else takes a
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from collector.adapters.base import Venue
 from collector.adapters.binance import BinanceAdapter
 from collector.adapters.coinbase import CoinbaseAdapter
 from collector.adapters.kraken import KrakenAdapter
+from collector.router import BookRouter
 from collector.settings import CollectorSettings
+from collector.transform import BookTransform
 
 
 def build(settings: CollectorSettings) -> Venue:
@@ -37,6 +41,35 @@ def build(settings: CollectorSettings) -> Venue:
     if settings.venue == "kraken":
         return KrakenAdapter(depth=settings.depth, **_endpoints(settings, "ws_url"))
     raise ValueError(f"no adapter for venue {settings.venue!r}")
+
+
+def build_router(
+    settings: CollectorSettings, symbols: Sequence[str]
+) -> tuple[BookRouter, Venue]:
+    """A router for one shard, and the transport that feeds it.
+
+    The adapters are keyed by `sequence_key`, which is what makes a
+    connection-scoped venue share a single one across every book on the shard
+    and a symbol-scoped venue give each book its own. No caller has to know
+    which kind it got — that is the whole point of the key — but this function
+    does, because it is the one place a venue is named at all.
+
+    The transport is a *separate* instance from any of them, keeping the two
+    Phase 2 rules intact: the source's cursor and the transform's cursor are
+    different decisions over one venue rule and must not share state.
+    """
+    template = build(settings)
+    sequencers: dict[str, Venue] = {}
+    books: dict[str, BookTransform] = {}
+    for symbol in symbols:
+        key = template.sequence_key(symbol)
+        if key not in sequencers:
+            sequencers[key] = build(settings)
+        books[template.stream_tag(symbol)] = BookTransform(
+            symbol=symbol, adapter=sequencers[key]
+        )
+    router = BookRouter(books, tuple(sequencers.values()))
+    return router, template
 
 
 def _endpoints(settings: CollectorSettings, *names: str) -> dict[str, str]:

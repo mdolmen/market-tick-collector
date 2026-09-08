@@ -113,6 +113,10 @@ class CoinbaseAdapter:
         self._ws_url = ws_url
         self._prev_seq: int | None = None
         self._snapshot_required = True
+        # The sequence at which this connection last lost a message. Below
+        # every real sequence until one does, so a snapshot taken on a
+        # connection that has never broken is never stale. See `snapshot_stale`.
+        self._last_break_seq = -1
 
     # --- transport ---------------------------------------------------------
 
@@ -239,17 +243,33 @@ class CoinbaseAdapter:
         return first_seq == prev_final_seq + 1
 
     def snapshot_stale(self, first_buffered_seq: int, snapshot_seq: int) -> bool:
-        """The buffer starts past the snapshot, so updates between are lost.
+        """The connection broke after this snapshot, so it describes a stream
+        we have not followed continuously since.
 
-        The same rule as Binance's, and it applies here for a reason that is
-        not obvious: an in-band snapshot cannot be stale *on arrival*, but the
-        transform holds on to the last one it saw, and a gap ten seconds later
-        is judged against that. Returning False unconditionally — which this
-        did at first — rebuilds the book from a snapshot the stream has long
-        overrun, silently dropping every update in between. It showed up as
+        An in-band snapshot cannot be stale *on arrival*, but the transform
+        holds on to the last one it saw and a gap ten seconds later is judged
+        against that. Returning False unconditionally — which this did at
+        first — rebuilds the book from a snapshot the stream has long overrun,
+        silently dropping every update in between, and showed up in Phase 2 as
         crossed books under fault injection.
+
+        **The rule was `first_buffered_seq > snapshot_seq + 1` until Phase 3,
+        and that was adjacency standing in for continuity.** The two are the
+        same thing only when the connection carries one product. With several,
+        `sequence_num` counts the whole socket, so a product's own next frame
+        is several numbers past its snapshot with nothing missing at all —
+        measured, 2026-09-08: three products, 5802 messages, no break, and
+        BTC-USD held 2229 of them. Under the old rule every book on a
+        multiplexed connection was permanently `SNAPSHOT_TOO_OLD`: two of three
+        products bootstrapped once and then gapped forever, and the third never
+        bootstrapped at all.
+
+        Asking when the *connection* last broke is what adjacency was always
+        approximating, and it is exact at every product count. The Phase 2
+        property is preserved exactly — a gap after the snapshot still
+        invalidates it — because that gap is what moves the break.
         """
-        return first_buffered_seq > snapshot_seq + 1
+        return self._last_break_seq > snapshot_seq
 
     def bootstrap(
         self, buffered: Sequence[Update], snapshot: Snapshot
@@ -283,6 +303,10 @@ class CoinbaseAdapter:
         if self.in_sequence(update):
             return False
         self._snapshot_required = True
+        # Where the continuity broke, which is what `snapshot_stale` judges a
+        # snapshot's age against. Recorded at the *update that revealed* the
+        # break: everything numbered at or before it was still followed.
+        self._last_break_seq = update.first_seq
         return True
 
     def snapshot_required(self) -> bool:
