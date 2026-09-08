@@ -71,17 +71,23 @@ is a legal `Source` and `WorkerApp` ran it untouched, so Phase 0 needed **zero**
 
 ## Phase 3 · Connection supervision & sharding
 
-- [ ] Shard symbols across connections; size shards by recovery time, not by venue cap
-- [ ] Bin-pack shards by measured message rate — BTC and ETH must not share a socket
-- [ ] Batch SUBSCRIBE frames; the outbound limit is 5 msg/s on Binance spot
-- [ ] Per-connection backoff, liveness and resubscribe; a failure never crosses connections
-- [ ] Stagger connection opens so Binance's 24h expiry never synchronises the shards
-- [ ] Make-before-break at ~23h: open the replacement, bootstrap it, then cut over
-- [ ] Stagger the REST snapshot storm after any multi-book recovery, against the rate limit
-- [ ] Measure convergence after the venue's own daily disconnect; report it separately
+- [x] ~~Shard symbols across connections; size shards by recovery time, not by venue cap~~ —
+      sized by blast radius instead. Recovery time was measured and does not scale with
+      shard size, so it cannot set one; see `NOTES.md`
+- [x] Bin-pack shards by measured message rate — BTC and ETH must not share a socket
+- [x] Batch SUBSCRIBE frames; the outbound limit is 5 msg/s on Binance spot
+- [x] Per-connection backoff, liveness and resubscribe; a failure never crosses connections
+- [x] Stagger connection opens so Binance's 24h expiry never synchronises the shards
+- [ ] Make-before-break at ~23h — moved to Phase 4; break-before-make ships here
+- [x] Stagger the REST snapshot storm after any multi-book recovery, against the rate limit
+- [ ] Measure convergence after the venue's own daily disconnect — moved to Phase 4
+- [x] Demultiplex a shard's records into one book per symbol
+- [x] Judge connection-scoped continuity per connection, not per book
 
 ## Phase 4 · SDK extension: `ServiceApp` + streaming primitives
 
+- [ ] Make-before-break at ~23h: open the replacement, bootstrap it, then cut over
+- [ ] Measure convergence after the venue's own daily disconnect; report it separately
 - [ ] ClickHouse spike **first** — the sink contract below is designed for its insert path
 - [ ] Load a day of Phase 1 capture; pick the MergeTree sort key and partitioning
 - [ ] One row per price level at 10⁷/day makes that ordering load-bearing, so measure it
@@ -89,12 +95,10 @@ is a legal `Source` and `WorkerApp` ran it untouched, so Phase 0 needed **zero**
 - [ ] `ServiceApp` in `data-pipeline-core`: run until stopped, health endpoint, graceful drain
 - [ ] Periodic metrics push — `WorkerApp` pushes in the `finally` of `run()`, useless here
 - [ ] Batch-oriented `Sink`: size/time flush triggers, defined fate for the partial batch
-- [ ] Extract backoff out of `HttpClient._backoff` into one policy both transports use
 - [ ] Connection supervisor primitive: N connections, per-connection health, no shared fate
 - [ ] Bounded queue primitive with high and low watermarks, not a single threshold
 - [ ] Checkpoint protocol over an opaque token — this consumer's answer is "nothing"
-- [ ] `RunContext` carries a metrics handle — nothing in a `Source` or `Transform` can
-      export a series today, which is why Phase 2 measures clock difference but cannot push it
+- [ ] `RunContext` carries a metrics handle — nothing in a `Source` or `Transform` can export a series today, which is why Phase 2 measures clock difference but cannot push it
 - [ ] Clock-difference histogram labelled by venue, deferred from Phase 2
 - [ ] New series `messages_dropped_total`, `queue_depth`, drop reason — a deliberate §8 change
 - [ ] Label them `queue="ring"|"batch"`; `stage` is already taken by the SDK and frozen
@@ -117,8 +121,7 @@ is a legal `Source` and `WorkerApp` ran it untouched, so Phase 0 needed **zero**
 - [ ] One book per `(venue, symbol)`, a `dict` keyed by price (decided)
 - [ ] Benchmark it against sorted-array and ticks-from-mid at a realistic read:write ratio
 - [ ] Measure the hot read — best bid/ask — not just diff application
-- [ ] The checksum stays out of it: it reads decimal strings, `Book` holds ticks. Kraken's
-      per-frame ordered read is on the adapter's own view, already measured
+- [ ] The checksum stays out of it: it reads decimal strings, `Book` holds ticks. Kraken's per-frame ordered read is on the adapter's own view, already measured
 - [ ] Bootstrap splice: buffer first, snapshot second, find the event straddling `lastUpdateId`
 - [ ] Distinguish snapshot-too-old (refetch) from buffer-behind (keep waiting)
 - [ ] Sizes are absolute set-to-value, never increments; zero is the only deletion signal
