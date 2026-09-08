@@ -152,7 +152,36 @@ class FrameSource:
         self._control = 0
         self._resubscribes = 0
 
-    def fetch(self, ctx: RunContext) -> Iterator[CaptureRecord]:
+    def dropped(self, stream: str) -> None:
+        """A record for this stream was dropped before it could be landed.
+
+        Called by the supervisor when the queue is full. It latches the
+        symbol's skip so the existing `_snapshot_due` machinery lands a repair
+        snapshot, because a dropped record is a hole the capture otherwise has
+        no repair for — and a capture that cannot be replayed cold is the one
+        thing this class exists to prevent.
+
+        Deliberately *not* a counter of its own. The reason a drop matters here
+        is that the book downstream is about to be wrong, and the existing
+        repair path already knows how to say so.
+        """
+        symbol = self._symbol_of.get(stream)
+        if symbol is None:
+            return
+        state = self._states[self._keys[symbol]]
+        state.skipped = True
+        state.skip_reason = "dropped"
+
+    def fetch(
+        self, ctx: RunContext, *, until: float | None = None
+    ) -> Iterator[CaptureRecord]:
+        """Stream this shard until `until` (a `time.monotonic` value).
+
+        The deadline is a parameter rather than only a constructor setting so
+        the supervisor can call this again after a reconnect and reuse the
+        whole of connect → subscribe → check → bootstrap, instead of
+        reimplementing any of it.
+        """
         with connect(
             self._venue.ws_url(self.symbols),
             close_timeout=_CLOSE_TIMEOUT_S,
@@ -171,7 +200,7 @@ class FrameSource:
             # Clock starts after the handshake, so the measured window is the
             # duration that was asked for rather than that minus a connect.
             started = time.monotonic()
-            deadline = started + self._duration_s
+            deadline = started + self._duration_s if until is None else until
             checked_subscription = False
             while True:
                 received = self._recv(ws, ctx, deadline)

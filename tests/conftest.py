@@ -308,9 +308,15 @@ def _kr_time(index: int) -> str:
 
 
 class KrakenSession:
-    """A consistent Kraken session: a book, and the checksums it implies."""
+    """A consistent Kraken session: a book, and the checksums it implies.
 
-    def __init__(self) -> None:
+    ``symbol`` because a shard puts several on one connection, and each keeps
+    its own book and its own checksum — the venue sends one `data[]` entry per
+    message whatever is subscribed (measured 2026-09-08, 25635 of 25635).
+    """
+
+    def __init__(self, symbol: str = _KR_SYMBOL) -> None:
+        self.symbol = symbol
         self.bids: dict[int, str] = {}
         self.asks: dict[int, str] = {}
         for depth in range(_KR_LEVELS):
@@ -358,7 +364,7 @@ class KrakenSession:
             "type": kind,
             "data": [
                 {
-                    "symbol": _KR_SYMBOL,
+                    "symbol": self.symbol,
                     "bids": bids,
                     "asks": asks,
                     "checksum": self.checksum(),
@@ -377,7 +383,9 @@ def kraken_control(index: int) -> dict[str, Any]:
     return {"channel": "heartbeat"}
 
 
-def kraken_capture(*, count: int, snapshot_every: int = 0) -> list[CaptureRecord]:
+def kraken_capture(
+    *, count: int, snapshot_every: int = 0, symbol: str = _KR_SYMBOL
+) -> list[CaptureRecord]:
     """`count` consistent updates, with a snapshot at 0 and every `n` after.
 
     Unlike the other two builders there is nothing to keep chained here. What
@@ -388,14 +396,14 @@ def kraken_capture(*, count: int, snapshot_every: int = 0) -> list[CaptureRecord
     if snapshot_every > 0:
         positions |= set(range(snapshot_every, count, snapshot_every))
 
-    session = KrakenSession()
+    session = KrakenSession(symbol)
     records: list[CaptureRecord] = []
 
     def append(kind: Kind, payload: dict[str, Any]) -> None:
         seq = len(records) + 1
         records.append(
             CaptureRecord(
-                stream=_KR_STREAM,
+                stream=f"book:{symbol}",
                 kind=kind,
                 seq=seq,
                 receive_ts=1_700_000_000_000_000_000 + seq * _STEP_NS,
