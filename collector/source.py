@@ -225,6 +225,9 @@ class FrameSource:
         # Symbols with a fetch already in flight, so a busy stream cannot ask
         # for the same snapshot a hundred times while the first is pending.
         self._pending: set[str] = set()
+        # When this connection last produced a frame or a snapshot. Reset at
+        # every connect; see `_LIVENESS_TIMEOUT_S`.
+        self._last_book_at = 0.0
 
     def dropped(self, stream: str) -> None:
         """A record for this stream was dropped before it could be landed.
@@ -274,6 +277,9 @@ class FrameSource:
             # Clock starts after the handshake, so the measured window is the
             # duration that was asked for rather than that minus a connect.
             started = time.monotonic()
+            # The liveness clock starts at the subscribe, not at the last
+            # message, so a connection that never delivers one is caught too.
+            self._last_book_at = started
             deadline = started + self._duration_s if until is None else until
             checked_subscription = False
             while True:
@@ -424,7 +430,6 @@ class FrameSource:
         gap that never happened. ``FaultInjector`` already leaves every
         non-frame record alone, so landing it costs nothing downstream.
         """
-        last_heard = time.monotonic()
         while True:
             now = time.monotonic()
             remaining = deadline - now
@@ -432,7 +437,7 @@ class FrameSource:
                 return None
             if (
                 self._liveness_timeout_s > 0
-                and now - last_heard > self._liveness_timeout_s
+                and now - self._last_book_at > self._liveness_timeout_s
             ):
                 # An `OSError`, so the supervisor treats it as the transport
                 # failure it is and reconnects this shard alone.
@@ -464,7 +469,11 @@ class FrameSource:
             kind = self._venue.classify(stream or self._control_stream, payload)
             if kind != "control":
                 # Only book traffic counts as alive; see `_LIVENESS_TIMEOUT_S`.
-                last_heard = time.monotonic()
+                # Instance state, not a local: `_recv` returns on *every*
+                # message, so a local was reset by each heartbeat and the
+                # watchdog could only ever measure one call. That is why a
+                # stalled shard went 150s without reconnecting.
+                self._last_book_at = time.monotonic()
             self._track(kind, payload, symbol)
             return (
                 self._record(
