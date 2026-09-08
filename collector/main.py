@@ -100,6 +100,7 @@ def resolve_shards(settings: CollectorSettings) -> tuple[tuple[str, ...], ...]:
         venue_cap=venue.max_symbols_per_connection,
         recovery_budget_s=settings.recovery_budget_s,
         per_symbol_recovery_s=settings.per_symbol_recovery_s,
+        blast_radius=settings.max_symbols_per_shard,
     )
     return plan_shards(symbols, RATES.get(settings.venue, {}), max_per_shard=size)
 

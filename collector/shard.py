@@ -42,20 +42,51 @@ DEFAULT_RECOVERY_BUDGET_S = 5.0
 
 
 def shard_size(
-    *, venue_cap: int, recovery_budget_s: float, per_symbol_recovery_s: float
+    *,
+    venue_cap: int,
+    recovery_budget_s: float,
+    per_symbol_recovery_s: float,
+    blast_radius: int = 0,
 ) -> int:
-    """The most symbols one connection may carry, by the tighter of two rules.
+    """The most symbols one connection may carry, by the tightest rule that binds.
 
-    `per_symbol_recovery_s` is what a symbol costs to bring back — N REST calls
-    against a request-rate limit on an out-of-band venue, in-band snapshot
-    bandwidth on a venue that repairs by resubscribing. Zero or less means it
-    has not been measured yet, and the venue cap is then the only bound; that
-    is a weaker plan and the caller should say so rather than pretend.
+    Three bounds and the minimum wins: the venue's own cap, the blast radius
+    accepted, and a recovery budget divided by what a symbol costs to bring
+    back. `blast_radius` and `per_symbol_recovery_s` are both optional; zero
+    means that bound is not being applied.
+
+    **The recovery bound is measured and does not bind, which is the opposite
+    of what `NOTES.md` predicted.** `tools/recovery.py` over 5, 10 and 20
+    symbols, 2026-09-08:
+
+        kraken     3.95s   9.65s  15.43s
+        coinbase  11.23s  14.38s  16.80s
+        binance   17.83s  42.81s  18.66s
+
+    The per-symbol figure *falls* as the shard grows — 3.57s to 0.93s on
+    Binance — so it is not a constant to divide by. The reason is that a
+    symbol's first snapshot is only fetched once its first frame arrives, so
+    the time to a fully trusted shard is set by the **quietest** symbol on it
+    rather than by the sum of the work: a `max`, not a `sum`. Two consequences,
+    both against the design's expectations:
+
+    - Dividing a budget by a per-symbol cost is the wrong shape, and it stays
+      here only because a venue with a genuinely linear repair cost would need
+      it. Leave `per_symbol_recovery_s` at zero unless a measurement supports
+      it.
+    - `NOTES.md`'s illustrative 5s budget is not achievable at *any* shard
+      size, including one: the floor is a quiet symbol's first message.
+
+    So the constraint that actually binds is the blast radius — how many books
+    may go untrusted at once — and on Coinbase the venue cap of 30 gets there
+    first anyway.
     """
-    if per_symbol_recovery_s <= 0:
-        return max(1, venue_cap)
-    by_recovery = int(recovery_budget_s / per_symbol_recovery_s)
-    return max(1, min(venue_cap, by_recovery))
+    bounds = [venue_cap]
+    if blast_radius > 0:
+        bounds.append(blast_radius)
+    if per_symbol_recovery_s > 0:
+        bounds.append(int(recovery_budget_s / per_symbol_recovery_s))
+    return max(1, min(bounds))
 
 
 def plan_shards(

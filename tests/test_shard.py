@@ -87,7 +87,7 @@ def test_a_nonsense_cap_is_refused() -> None:
         plan_shards(["A"], {}, max_per_shard=0)
 
 
-def test_the_tighter_of_the_two_caps_wins() -> None:
+def test_the_tightest_bound_wins() -> None:
     # Recovery binds: 5s budget at 0.1s a symbol is 50, well under Binance's cap.
     assert (
         shard_size(venue_cap=1024, recovery_budget_s=5.0, per_symbol_recovery_s=0.1)
@@ -106,6 +106,18 @@ def test_the_tighter_of_the_two_caps_wins() -> None:
     assert (
         shard_size(venue_cap=1024, recovery_budget_s=0.01, per_symbol_recovery_s=9.0)
         == 1
+    )
+    # Blast radius binds where it is the smallest of the three, which the
+    # Phase 3 measurement says is the usual case: recovery time barely grows
+    # with shard size, so it rarely gets a say.
+    assert (
+        shard_size(
+            venue_cap=1024,
+            recovery_budget_s=5.0,
+            per_symbol_recovery_s=0.0,
+            blast_radius=30,
+        )
+        == 30
     )
 
 

@@ -49,6 +49,13 @@ class CollectorSettings(Settings):
     recovery_budget_s: float = 5.0
     per_symbol_recovery_s: float = 0.0
 
+    # How many books may go untrusted at once — the blast radius of losing one
+    # connection, as a symbol count. Measured in Phase 3, this is the bound
+    # that actually binds: recovery time is dominated by the quietest symbol's
+    # first message rather than by per-symbol work, so it barely grows with
+    # shard size. 30 matches the smallest venue cap, so every venue shards.
+    max_symbols_per_shard: int = 30
+
     # Shard *i* opens at ``i * shard_stagger_s``, so a venue that force-closes
     # a connection after a fixed lifetime never expires them all at once.
     shard_stagger_s: float = 1.0
