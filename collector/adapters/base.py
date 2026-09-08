@@ -160,6 +160,33 @@ class VenueAdapter(Protocol):
         """
         ...
 
+    def sequence_key(self, symbol: str) -> str:
+        """Whose sequence this symbol's messages belong to.
+
+        The answer is the symbol itself on a venue that numbers each book
+        independently — Binance's `[U, u]` are order-book ids and Kraken's
+        checksum is per symbol, so two symbols on one socket prove nothing
+        about each other. It is a **single shared constant** on a venue that
+        numbers the *connection*: Coinbase counts every message on the socket,
+        acks included, so with fifty products on it no product's messages are
+        adjacent to each other and a per-symbol cursor would report a gap on
+        essentially every frame.
+
+        This exists so that nothing has to branch on which. A caller keys its
+        sequence state by this, and a connection-scoped venue collapses to one
+        entry without a conditional anywhere — the aliasing *is* the venue
+        fact. A boolean would put an `if` at every call site, and each of those
+        is a place the venue identity leaks back in past the boundary that
+        `tests/test_boundary.py` guards.
+
+        It follows that a break is scoped the same way. One lost message on
+        Coinbase means every book on that connection is untrusted, because the
+        sequence cannot say which product the missing message was about. That
+        is a real cost of multiplexing on that venue and the reason
+        `NOTES.md` § *Connection supervision* sizes shards by blast radius.
+        """
+        ...
+
     def sequence_ids(self, payload: Mapping[str, Any]) -> tuple[int, int]:
         """`(first, final)` out of a raw payload, without building the model.
 

@@ -39,6 +39,14 @@ from typing import Any, Literal, TypedDict
 
 Kind = Literal["frame", "snapshot", "control"]
 
+# The `stream` a message about the connection rather than about any one book
+# carries — a subscribe ack, a heartbeat, a status frame. One symbol per socket
+# had no need for it: every record could take that symbol's tag, because there
+# was only one. A shard has many, and attributing an ack to whichever book
+# happened to be first would move that book's cursor for a message that was
+# never about it. Venue-neutral, like everything else in this module.
+CONTROL_STREAM = "control"
+
 # **The decoder never produces a float.** ``parse_float=str`` hands back the
 # venue's own source token instead of a float, everywhere, for every venue.
 #

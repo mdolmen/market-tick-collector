@@ -34,7 +34,19 @@ VENUE = "binance"
 
 # The stream tag a captured REST depth snapshot carries. Binance's snapshot
 # arrives out of band, so it has no websocket stream name of its own.
+#
+# A **prefix**, with the symbol appended, because one connection now fetches a
+# snapshot for each of many symbols and a single shared tag would leave a
+# replay unable to tell which book each one describes. Kept as a prefix rather
+# than replaced by a new constant so that `classify` can go on recognising the
+# Phase 1 captures, which were landed under the bare value.
 REST_DEPTH_STREAM = "rest:depth"
+
+
+def rest_depth_stream(symbol: str) -> str:
+    """The tag one symbol's REST snapshot lands under."""
+    return f"{REST_DEPTH_STREAM}:{symbol.upper()}"
+
 
 _WS_URL = "wss://stream.binance.com:9443/ws"
 _REST_URL = "https://api.binance.com/api/v3/depth"
@@ -116,7 +128,7 @@ class BinanceAdapter:
 
     def snapshot_request(self, symbol: str) -> SnapshotRequest | None:
         return SnapshotRequest(
-            stream=REST_DEPTH_STREAM,
+            stream=rest_depth_stream(symbol),
             url=self._rest_url,
             params={"symbol": symbol.upper(), "limit": self._snapshot_limit},
         )
@@ -127,9 +139,14 @@ class BinanceAdapter:
         """By stream tag: the snapshot never came over the socket.
 
         Never `control`: every message on a raw depth stream is a
-        `depthUpdate`, which the Phase 2 probe confirmed over a live session.
+        `depthUpdate`, which the Phase 2 probe confirmed over a live session,
+        and the URL-path subscription this venue uses produces no ack.
+
+        `startswith` rather than equality: the tag gained a `:SYMBOL` suffix in
+        Phase 3 so a shard's snapshots can be told apart, and the Phase 1
+        captures were landed under the bare prefix. Both still classify.
         """
-        return "snapshot" if stream == REST_DEPTH_STREAM else "frame"
+        return "snapshot" if stream.startswith(REST_DEPTH_STREAM) else "frame"
 
     def stream_of(self, payload: Mapping[str, Any]) -> str | None:
         """From `s`, the symbol the venue stamps on every `depthUpdate`.
@@ -139,6 +156,10 @@ class BinanceAdapter:
         """
         symbol = payload.get("s")
         return None if symbol is None else self.stream_tag(str(symbol))
+
+    def sequence_key(self, symbol: str) -> str:
+        """The symbol: `[U, u]` are order-book ids, not connection ids."""
+        return symbol.upper()
 
     def sequence_ids(self, payload: Mapping[str, Any]) -> tuple[int, int]:
         return int(payload["U"]), int(payload["u"])

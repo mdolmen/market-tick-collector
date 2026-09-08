@@ -46,6 +46,10 @@ VENUE = "coinbase"
 
 _WS_URL = "wss://advanced-trade-ws.coinbase.com"
 _CHANNEL = "level2"
+
+# The `sequence_key` every symbol on a connection shares. Not a symbol, and
+# deliberately not spellable as one, so it can never collide with a product id.
+_CONNECTION = "<connection>"
 _BOOK_CHANNEL = "l2_data"
 
 _NS_DIGITS = 9
@@ -159,6 +163,17 @@ class CoinbaseAdapter:
             return None
         events = payload["events"]
         return self.stream_tag(str(events[0]["product_id"])) if events else None
+
+    def sequence_key(self, symbol: str) -> str:
+        """One key for the whole connection, whatever the symbol.
+
+        `sequence_num` counts every message on the socket — book messages for
+        all products and the acks between them — so the thing that can lose a
+        message is the connection, not the product. Measured over a 120s
+        three-product subscribe in Phase 3: 5802 messages, 0 → 5801, no break,
+        and BTC-USD held only 2229 of them.
+        """
+        return _CONNECTION
 
     def sequence_ids(self, payload: Mapping[str, Any]) -> tuple[int, int]:
         """One number per message, so the range is a point."""

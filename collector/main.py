@@ -55,6 +55,7 @@ from collector.replay import FaultConfig, ReplaySource
 from collector.settings import CollectorSettings
 from collector.sinks import ConsoleSink
 from collector.source import FrameSource
+from collector.symbols import OVERLAPPING_BASES, native
 from collector.transform import BookTransform
 
 
@@ -63,12 +64,26 @@ def _channel(settings: CollectorSettings) -> str:
     return settings.raw_channel or f"{settings.venue}-depth"
 
 
+def resolve_symbols(settings: CollectorSettings) -> tuple[str, ...]:
+    """The shard, in the venue's own spelling.
+
+    ``*`` means every overlapping base; a comma list means those; empty means
+    the single ``symbol``, which is what every invocation before Phase 3 used.
+    """
+    if not settings.symbols:
+        return (settings.symbol,)
+    if settings.symbols.strip() == "*":
+        return tuple(native(base, settings.venue) for base in OVERLAPPING_BASES)
+    return tuple(s.strip() for s in settings.symbols.split(",") if s.strip())
+
+
 def _frame_source(settings: CollectorSettings) -> FrameSource:
     return FrameSource(
         venue=adapters.build(settings),
-        symbol=settings.symbol,
+        symbols=resolve_symbols(settings),
         duration_s=settings.duration_s,
         snapshot_interval_s=settings.snapshot_interval_s,
+        subscribe_grace_s=settings.subscribe_grace_s,
     )
 
 

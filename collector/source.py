@@ -41,14 +41,15 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 from data_pipeline_core import RunContext
 from websockets.sync.client import ClientConnection, connect
 
 from collector.adapters.base import Venue
-from collector.capture import CaptureRecord, Kind, decode
+from collector.capture import CONTROL_STREAM, CaptureRecord, Kind, decode
 
 # A refetch that keeps landing behind the buffer means something is wrong with
 # the venue or the clock, not with our patience. Fail the run rather than spin.
@@ -69,87 +70,135 @@ _CLOSE_TIMEOUT_S = 2.0
 # than disabled: unbounded lets a venue drive our allocator.
 _MAX_MESSAGE_BYTES = 16 * 1024 * 1024
 
+# How long after subscribing to check that every symbol on the shard actually
+# got one. A rejection comes back in well under a second on all three venues;
+# this is generous so a slow first snapshot is never mistaken for one.
+_SUBSCRIBE_GRACE_S = 15.0
+
+
+@dataclass(slots=True)
+class _SymbolState:
+    """The snapshot decision for one symbol, and nothing else.
+
+    Phase 0 through 2.5 held these as scalars on the source, because a
+    connection carried one symbol and the two were the same thing. A shard
+    makes them different things: the socket is shared, the decision is not.
+    Every field here was one of those scalars, moved rather than invented.
+    """
+
+    # The last received frame's final id, and the first id seen since the most
+    # recent snapshot — the two the fetch decision needs. Both stay None on a
+    # venue whose snapshot arrives in band, where there is no fetch to decide.
+    prev_final_seq: int | None = None
+    first_seq_since_snapshot: int | None = None
+    snapshot_seq: int | None = None
+    skipped: bool = False
+    # Which of the two checks in ``_track`` said so. Logged rather than acted
+    # on — the repair is the same either way — but a run that resubscribes
+    # needs to say whether the sequence or the venue's own checksum called it,
+    # because on some venues only one of them can.
+    skip_reason: str = ""
+    refetches: int = 0
+    last_snapshot_at: float = 0.0
+
 
 class FrameSource:
-    """Stream one symbol's frames, with a snapshot whenever one is due."""
+    """Stream a shard's frames, with a snapshot whenever one is due.
+
+    One connection, many symbols, and one ``_SymbolState`` each. The venue
+    rules are unchanged — every decision below is the one Phase 2 made, asked
+    per symbol instead of once.
+    """
 
     def __init__(
         self,
         *,
         venue: Venue,
-        symbol: str,
+        symbols: Sequence[str],
         duration_s: float,
         snapshot_interval_s: float = 0.0,
+        subscribe_grace_s: float = _SUBSCRIBE_GRACE_S,
     ) -> None:
         self._venue = venue
-        self.symbol = symbol.upper()
+        self.symbols = tuple(dict.fromkeys(symbol.upper() for symbol in symbols))
+        if not self.symbols:
+            raise ValueError("a shard needs at least one symbol")
         self.name = f"{venue.venue}-depth"
         self._duration_s = duration_s
         self._snapshot_interval_s = snapshot_interval_s
-        self._stream = venue.stream_tag(self.symbol)
-        self._snapshot_request = venue.snapshot_request(self.symbol)
+        self._subscribe_grace_s = subscribe_grace_s
+        # Tag to symbol, which is the direction the receive path needs:
+        # ``stream_of`` hands back a tag and the state is keyed by symbol.
+        self._symbol_of = {venue.stream_tag(s): s for s in self.symbols}
+        self._requests = {s: venue.snapshot_request(s) for s in self.symbols}
+        # A venue's snapshot arrives out of band or in band; it is a property
+        # of the venue, so asking any one symbol answers for the shard.
+        self._out_of_band = self._requests[self.symbols[0]] is not None
+        # Keyed by ``sequence_key``, not by symbol. On a venue that numbers
+        # each book independently that is one state per symbol; on one that
+        # numbers the connection every symbol maps to the same entry and the
+        # dict collapses to a single state. No branch here says which — the
+        # aliasing is the venue's answer. See ``VenueAdapter.sequence_key``.
+        self._keys = {symbol: venue.sequence_key(symbol) for symbol in self.symbols}
+        self._states = {key: _SymbolState() for key in self._keys.values()}
+        # Book messages seen per *symbol*, which is a different question from
+        # the sequence and stays per-symbol even where the sequence does not.
+        # It answers "did this subscription take", and on a connection-scoped
+        # venue the shared cursor cannot: one product speaking would vouch for
+        # forty-nine that never did.
+        self._heard = dict.fromkeys(self.symbols, 0)
 
         self._seq = 0
-        self._frames = 0
-        self._snapshots = 0
         self._control = 0
-        # The last received frame's final id, and the first id seen since the
-        # most recent snapshot was fetched — the two the fetch decision needs,
-        # and the only sequence state this class keeps. Both stay None on a
-        # venue whose snapshot arrives in band, where there is no fetch to
-        # decide about.
-        self._prev_final_seq: int | None = None
-        self._first_seq_since_snapshot: int | None = None
-        self._snapshot_seq: int | None = None
-        self._skipped = False
-        # Which of the two checks in ``_track`` said so. Logged rather than
-        # acted on — the repair is the same either way — but a run that
-        # resubscribes needs to say whether the sequence or the venue's own
-        # checksum called it, because on some venues only one of them can.
-        self._skip_reason = ""
-        self._refetches = 0
         self._resubscribes = 0
-        self._last_snapshot_at = 0.0
 
     def fetch(self, ctx: RunContext) -> Iterator[CaptureRecord]:
         with connect(
-            self._venue.ws_url([self.symbol]),
+            self._venue.ws_url(self.symbols),
             close_timeout=_CLOSE_TIMEOUT_S,
             max_size=_MAX_MESSAGE_BYTES,
         ) as ws:
-            for frame in self._venue.subscribe_frames([self.symbol]):
+            # One frame for the shard, so the outbound rate limit does not
+            # bind. See ``VenueTransport.subscribe_frames``.
+            for frame in self._venue.subscribe_frames(self.symbols):
                 ws.send(frame)
             ctx.logger.info(
-                "connected", stream=self._stream, deadline_s=self._duration_s
+                "connected",
+                venue=self._venue.venue,
+                symbols=len(self.symbols),
+                deadline_s=self._duration_s,
             )
             # Clock starts after the handshake, so the measured window is the
             # duration that was asked for rather than that minus a connect.
             started = time.monotonic()
             deadline = started + self._duration_s
-            # Socket first, snapshot second. The other order loses every diff
-            # that lands during the fetch and starts the book silently corrupt.
-            # In-band venues get this ordering from the venue for free.
-            if self._snapshot_request is not None:
-                yield self._snapshot_record(ctx)
+            checked_subscription = False
             while True:
-                record = self._recv(ws, ctx, deadline)
-                if record is None:
+                received = self._recv(ws, ctx, deadline)
+                if received is None:
                     break
+                record, symbol = received
                 yield record
-                if not self._snapshot_due(ctx):
+                if not checked_subscription and (
+                    time.monotonic() - started >= self._subscribe_grace_s
+                ):
+                    self._assert_the_subscription_took(ctx)
+                    checked_subscription = True
+                if symbol is None or not self._snapshot_due(ctx, symbol):
                     continue
                 # One decision, two actions. Out of band we fetch and land the
                 # result ourselves; in band we ask the venue and its answer
                 # arrives as an ordinary record a few messages later.
-                if self._snapshot_request is not None:
-                    yield self._snapshot_record(ctx)
+                if self._out_of_band:
+                    yield self._snapshot_record(ctx, symbol)
                 else:
-                    self._resubscribe(ws, ctx)
+                    self._resubscribe(ws, ctx, symbol)
+            if not checked_subscription:
+                self._assert_the_subscription_took(ctx)
             self._report(ctx, time.monotonic() - started)
-            self._assert_the_subscription_took()
 
-    def _assert_the_subscription_took(self) -> None:
-        """A run that received no book message at all did not run.
+    def _assert_the_subscription_took(self, ctx: RunContext) -> None:
+        """Symbols that never sent a book message did not subscribe.
 
         Venue-neutral on purpose, because the way this goes wrong is not.
         Phase 2.5 subscribed Kraken to ``XBT/USD`` — the spelling
@@ -163,39 +212,62 @@ class FrameSource:
         A rejected subscription looks different on every venue and is a
         different shape again on each, so matching the ack would be three
         venue-specific parsers. Not receiving a single book message in the
-        whole window is the one symptom they share, and it is not something a
-        working subscription does — even an illiquid symbol gets the in-band
-        snapshot, and an out-of-band venue gets the REST one.
+        grace is the one symptom they share, and it is not something a working
+        subscription does — even an illiquid symbol gets the in-band snapshot,
+        and an out-of-band venue gets the REST one.
+
+        **Checked once, shortly after subscribing, rather than at the end.**
+        Phase 2.5 raised this at the deadline, which was free when a run was
+        one symbol: nothing had been landed yet, because ``WorkerApp`` calls
+        ``Sink.write`` once and ``raw_landing_sink`` writes one file at the end
+        of it. At shard scale that is the opposite of free — one misspelled
+        ticker in a batch of fifty would throw away a ten-minute capture of the
+        other forty-nine. A rejection is answered within a second or two, so
+        the grace window catches it just as reliably and costs nothing.
+
+        Silence *after* the grace window is not an error: an illiquid symbol
+        that has already sent its snapshot is entitled to say nothing more.
         """
-        if self._frames or self._snapshots:
+        silent = sorted(symbol for symbol, heard in self._heard.items() if not heard)
+        if not silent:
             return
         raise RuntimeError(
-            f"no book message on {self._stream!r} in {self._duration_s:.0f}s "
-            f"({self._control} control record(s)) — the subscription was "
-            f"almost certainly rejected; check the venue's spelling of "
-            f"{self.symbol!r}"
+            f"no book message for {len(silent)} of {len(self.symbols)} symbol(s) "
+            f"in {self._subscribe_grace_s:.0f}s on {self._venue.venue} "
+            f"({self._control} control record(s)) — the subscription was almost "
+            f"certainly rejected; check the venue's spelling of {silent!r}"
         )
 
-    def _resubscribe(self, ws: ClientConnection, ctx: RunContext) -> None:
-        """Ask an in-band venue for a fresh snapshot, and land nothing yet."""
-        frames = self._venue.resubscribe_frames([self.symbol])
+    def _resubscribe(self, ws: ClientConnection, ctx: RunContext, symbol: str) -> None:
+        """Ask an in-band venue for a fresh snapshot, and land nothing yet.
+
+        Only the symbol that needs repairing. Unsubscribing the whole shard to
+        fix one book would send every other book on it untrusted, which is the
+        blast radius sharding exists to bound.
+        """
+        frames = self._venue.resubscribe_frames([symbol])
         if not frames:
             return
         for frame in frames:
             ws.send(frame)
+        state = self._states[symbol]
         self._resubscribes += 1
-        self._last_snapshot_at = time.monotonic()
+        state.last_snapshot_at = time.monotonic()
         # The skip has been acted on. Leaving it latched asks again on the very
         # next record, before the answer has had time to arrive.
-        self._skipped = False
-        ctx.logger.info("resubscribed for a snapshot", stream=self._stream)
+        state.skipped = False
+        ctx.logger.info("resubscribed for a snapshot", symbol=symbol)
 
     # --- receiving ---------------------------------------------------------
 
     def _recv(
         self, ws: ClientConnection, ctx: RunContext, deadline: float
-    ) -> CaptureRecord | None:
-        """Next record, or None once the duration is up or a SIGTERM arrived.
+    ) -> tuple[CaptureRecord, str | None] | None:
+        """Next record and the symbol it is about, or None once time is up.
+
+        The symbol comes back alongside because ``fetch`` needs it to ask the
+        right snapshot question, and re-deriving it there would route every
+        message twice.
 
         Control traffic is landed like everything else. It carries no book
         state, so dropping it looks free — but Coinbase numbers acks in the
@@ -220,44 +292,58 @@ class FrameSource:
             # the ids are read here — the record model is the transform's cost,
             # not the capture worker's.
             payload = decode(text)
-            kind = self._venue.classify(self._stream, payload)
-            self._track(kind, payload)
-            return self._record(
-                stream=self._stream,
-                kind=kind,
-                receive_ts=receive_ts,
-                monotonic_ts=monotonic_ts,
-                payload=text,
+            stream = self._venue.stream_of(payload)
+            # A tag we never subscribed to is the venue answering about
+            # something we did not ask for. Landed under its own tag rather
+            # than attributed to a symbol, so the capture stays honest.
+            symbol = self._symbol_of.get(stream) if stream is not None else None
+            kind = self._venue.classify(stream or CONTROL_STREAM, payload)
+            self._track(kind, payload, symbol)
+            return (
+                self._record(
+                    stream=stream or CONTROL_STREAM,
+                    kind=kind,
+                    receive_ts=receive_ts,
+                    monotonic_ts=monotonic_ts,
+                    payload=text,
+                ),
+                symbol,
             )
 
-    def _track(self, kind: Kind, payload: Any) -> None:
-        """Advance the snapshot-decision state.
+    def _track(self, kind: Kind, payload: Any, symbol: str | None) -> None:
+        """Advance the snapshot-decision state for the symbol this is about.
 
         Both paths track the sequence, because both need to know when the
         socket skipped — the out-of-band one to refetch, the in-band one to
         resubscribe. Only the action differs, which is why the tracking is
         shared and the branch is one line in ``fetch``.
         """
+        if kind == "control":
+            self._control += 1
+            # Numbered like anything else on a venue that counts them, so it
+            # moves the cursor or the next frame looks like it skipped. There
+            # is no symbol on a control message, so this moves every distinct
+            # cursor — which is one of them on the only venue that numbers
+            # control, and on the others is the cursor's own current value.
+            for state in self._states.values():
+                state.prev_final_seq = self._venue.sequence_ids(payload)[1]
+            return
+        if symbol is None:
+            return
+        state = self._states[self._keys[symbol]]
+        self._heard[symbol] += 1
         if kind == "snapshot":
             self._venue.observe(payload)
-            self._snapshots += 1
-            self._snapshot_seq = self._venue.snapshot_seq(payload)
-            self._first_seq_since_snapshot = None
-            self._last_snapshot_at = time.monotonic()
+            state.snapshot_seq = self._venue.snapshot_seq(payload)
+            state.first_seq_since_snapshot = None
+            state.last_snapshot_at = time.monotonic()
             # An in-band snapshot occupies a sequence number of its own, so it
             # moves the cursor. Without this the frame after every snapshot
             # fails the chain rule, which asks for another snapshot, which is a
             # resubscribe loop — 42 of them in a 25s run before this line.
-            self._prev_final_seq = self._venue.snapshot_seq(payload)
-            self._skipped = False
+            state.prev_final_seq = self._venue.snapshot_seq(payload)
+            state.skipped = False
             return
-        if kind == "control":
-            self._control += 1
-            # Numbered like anything else on a venue that counts them, so it
-            # moves the cursor or the next frame looks like it skipped.
-            self._prev_final_seq = self._venue.sequence_ids(payload)[1]
-            return
-        self._frames += 1
         # Two ways one frame can tell this class the stream broke, and a venue
         # normally has only one of them. The chain rule is the sequence's
         # verdict; ``observe`` is the venue's own, and on a venue that numbers
@@ -269,59 +355,77 @@ class FrameSource:
         first_seq, final_seq = self._venue.sequence_ids(payload)
         # Judged against the *previous* frame, so it has to happen before the
         # cursor moves.
-        broke_chain = self._prev_final_seq is not None and not self._venue.chains(
-            self._prev_final_seq, first_seq
+        broke_chain = state.prev_final_seq is not None and not self._venue.chains(
+            state.prev_final_seq, first_seq
         )
-        self._skipped = broke_chain or not consistent
-        self._skip_reason = "sequence" if broke_chain else "checksum"
-        self._prev_final_seq = final_seq
-        if self._first_seq_since_snapshot is None:
-            self._first_seq_since_snapshot = first_seq
+        state.skipped = broke_chain or not consistent
+        state.skip_reason = "sequence" if broke_chain else "checksum"
+        state.prev_final_seq = final_seq
+        if state.first_seq_since_snapshot is None:
+            state.first_seq_since_snapshot = first_seq
 
     # --- deciding when to snapshot -----------------------------------------
 
-    def _snapshot_due(self, ctx: RunContext) -> bool:
-        """True when the capture needs a fresh snapshot to stay replayable.
+    def _snapshot_due(self, ctx: RunContext, symbol: str) -> bool:
+        """True when this symbol needs a fresh snapshot to stay replayable.
 
-        Two conditions, and they are the two failure branches of the bootstrap
-        seen from the I/O side. A snapshot that predates the first frame since
-        it was fetched has already lost updates and no amount of further
-        buffering fixes it. A break in the chain means the socket skipped, and
-        the book downstream is about to go untrusted with nothing to repair it.
+        Three conditions, and the first two are the failure branches of the
+        bootstrap seen from the I/O side. A snapshot that predates the first
+        frame since it was fetched has already lost updates and no amount of
+        further buffering fixes it. A break in the chain means the socket
+        skipped, and the book downstream is about to go untrusted with nothing
+        to repair it.
+
+        The third is the *initial* snapshot on an out-of-band venue, and it is
+        deliberately lazy: due once this symbol's first frame has arrived, not
+        at subscribe. "Socket first, snapshot second" is why — the other order
+        loses every diff that lands during the fetch — but at shard scale
+        fetching before the read loop would also mean a hundred blocking REST
+        calls with the socket unattended, which is how a connection dies. One
+        fetch per symbol, triggered by that symbol's own first frame, keeps the
+        ordering guarantee and spreads the storm across arrivals.
 
         On an in-band venue ``snapshot_stale`` is always false — there is no
         fetch window for updates to be lost in — so only the skip and the
         interval can fire, and both resolve to a resubscribe.
         """
-        if self._snapshot_seq is None or self._first_seq_since_snapshot is None:
+        state = self._states[self._keys[symbol]]
+        if state.first_seq_since_snapshot is None:
             return False
+        if state.snapshot_seq is None:
+            # In band, the venue sends it unasked and this must not pre-empt
+            # it; out of band, nobody else will.
+            return self._out_of_band
         if self._venue.snapshot_stale(
-            self._first_seq_since_snapshot, self._snapshot_seq
+            state.first_seq_since_snapshot, state.snapshot_seq
         ):
-            self._refetches += 1
-            if self._refetches > _MAX_SNAPSHOT_REFETCHES:
+            state.refetches += 1
+            if state.refetches > _MAX_SNAPSHOT_REFETCHES:
                 raise RuntimeError(
-                    f"snapshot still behind the stream after "
-                    f"{self._refetches} refetches"
+                    f"snapshot for {symbol} still behind the stream after "
+                    f"{state.refetches} refetches"
                 )
             ctx.logger.warning(
                 "snapshot too old, refetching",
-                snapshot_seq=self._snapshot_seq,
-                buffer_first_seq=self._first_seq_since_snapshot,
-                attempt=self._refetches,
+                symbol=symbol,
+                snapshot_seq=state.snapshot_seq,
+                buffer_first_seq=state.first_seq_since_snapshot,
+                attempt=state.refetches,
             )
             return True
         # The snapshot caught up, so the refetch budget is for the next stall
         # rather than for the whole run.
-        self._refetches = 0
-        if self._skipped:
+        state.refetches = 0
+        if state.skipped:
             ctx.logger.warning(
-                "stream broke, fetching a snapshot", reason=self._skip_reason
+                "stream broke, fetching a snapshot",
+                symbol=symbol,
+                reason=state.skip_reason,
             )
             return True
-        return self._interval_elapsed()
+        return self._interval_elapsed(state)
 
-    def _interval_elapsed(self) -> bool:
+    def _interval_elapsed(self, state: _SymbolState) -> bool:
         """Periodic snapshots, for two reasons that are not about this phase.
 
         A fault injected into a *recording* removes frames; it cannot conjure
@@ -335,26 +439,32 @@ class FrameSource:
         """
         if self._snapshot_interval_s <= 0:
             return False
-        return time.monotonic() - self._last_snapshot_at >= self._snapshot_interval_s
+        return time.monotonic() - state.last_snapshot_at >= self._snapshot_interval_s
 
     # --- fetching ----------------------------------------------------------
 
-    def _snapshot_record(self, ctx: RunContext) -> CaptureRecord:
+    def _snapshot_record(self, ctx: RunContext, symbol: str) -> CaptureRecord:
         """Through ``ctx.http``, so it inherits retry, backoff and the breaker.
 
         The websocket gets none of that, and that asymmetry is the argument for
         the connection supervisor in Phase 3.
+
+        Still inline on the reading thread, which is the coupling the
+        supervisor exists to break: this call retries with backoff and can
+        block for seconds while the socket goes unread. One symbol made that
+        tolerable and a shard does not.
         """
-        request = self._snapshot_request
+        request = self._requests[symbol]
         assert request is not None  # only the out-of-band path gets here
         response = ctx.http.get(request.url, params=dict(request.params))
         if response.status_code != 200:
             raise RuntimeError(f"depth snapshot returned {response.status_code}")
         payload: dict[str, Any] = response.json()
-        self._snapshots += 1
-        self._snapshot_seq = self._venue.snapshot_seq(payload)
-        self._first_seq_since_snapshot = None
-        self._last_snapshot_at = time.monotonic()
+        state = self._states[self._keys[symbol]]
+        self._heard[symbol] += 1
+        state.snapshot_seq = self._venue.snapshot_seq(payload)
+        state.first_seq_since_snapshot = None
+        state.last_snapshot_at = time.monotonic()
         return self._record(
             stream=request.stream,
             kind="snapshot",
@@ -385,15 +495,20 @@ class FrameSource:
     # --- the numbers -------------------------------------------------------
 
     def _report(self, ctx: RunContext, elapsed_s: float) -> None:
+        heard = sum(self._heard.values())
+        # Silence after the grace window is legitimate — an illiquid symbol
+        # that has already sent its snapshot owes nothing more — but it is
+        # still worth naming, because it is also what a shard looks like when
+        # one symbol has quietly stopped.
+        quiet = sorted(symbol for symbol, n in self._heard.items() if not n)
         ctx.logger.info(
             "capture finished",
             venue=self._venue.venue,
-            symbol=self.symbol,
-            stream=self._stream,
+            symbols=len(self.symbols),
             elapsed_s=round(elapsed_s, 3),
-            frames=self._frames,
-            frames_per_s=round(self._frames / elapsed_s, 1) if elapsed_s else 0.0,
-            snapshots=self._snapshots,
+            book_messages=heard,
+            messages_per_s=round(heard / elapsed_s, 1) if elapsed_s else 0.0,
             control=self._control,
             resubscribes=self._resubscribes,
+            quiet=quiet,
         )

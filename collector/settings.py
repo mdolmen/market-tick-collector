@@ -27,6 +27,17 @@ class CollectorSettings(Settings):
     symbol: str = "BTCUSDT"
     duration_s: float = 60.0
 
+    # The shard, in the venue's own spelling: comma-separated, or ``*`` for
+    # every overlapping base from ``collector/symbols.py``. Empty falls back to
+    # ``symbol``, so every existing one-symbol invocation keeps working and a
+    # shard is the general case rather than a second mode.
+    symbols: str = ""
+
+    # Checked once this long after subscribing: every symbol on the shard must
+    # have produced a book message by then, or the subscription was rejected.
+    # See ``FrameSource._assert_the_subscription_took`` on why not at the end.
+    subscribe_grace_s: float = 15.0
+
     # Binance's full-depth diff channel. 100ms rather than the 1000ms default:
     # volume is the reason this project exists.
     depth_interval_ms: int = 100

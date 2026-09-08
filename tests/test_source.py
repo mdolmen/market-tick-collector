@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Sequence
 from typing import Any, cast
 
 import pytest
@@ -76,6 +77,7 @@ def _run(
     messages: list[str],
     payloads: list[dict[str, Any]],
     duration_s: float = 0.2,
+    symbols: Sequence[str] = ("BTCUSDT",),
 ) -> tuple[list[CaptureRecord], _FakeHttp]:
     socket = _FakeSocket(messages)
     monkeypatch.setattr(
@@ -90,7 +92,7 @@ def _run(
             ws_url="wss://example.invalid/ws",
             rest_url="https://example.invalid/depth",
         ),
-        symbol="BTCUSDT",
+        symbols=symbols,
         duration_s=duration_s,
     )
     return list(source.fetch(ctx)), http
@@ -118,25 +120,66 @@ def _kinds(records: list[CaptureRecord]) -> list[str]:
     return [record["kind"] for record in records]
 
 
-def test_the_snapshot_comes_first_and_every_frame_lands_verbatim(
+def test_the_snapshot_follows_the_first_frame_and_every_frame_lands_verbatim(
     monkeypatch: pytest.MonkeyPatch,
     frames: list[str],
     snapshot_payload: dict[str, Any],
 ) -> None:
+    """Socket first, snapshot second — and in Phase 3 that is literal.
+
+    Phase 0 fetched before the read loop, which honoured the same rule because
+    the subscription was already open. A shard cannot: fetching for a hundred
+    symbols before reading leaves the socket unattended through a hundred
+    retrying HTTP calls. So the fetch is triggered by each symbol's own first
+    frame instead, which is the same guarantee arrived at one symbol at a time
+    — the frame is buffered, the snapshot lands behind it, and the transform
+    splices exactly as before.
+    """
     records, _ = _run(monkeypatch, frames, [snapshot_payload])
 
-    # Socket first, snapshot second — but the snapshot is the first *record*,
-    # because it describes the state the frames after it build on.
-    assert _kinds(records) == ["snapshot", *["frame"] * len(frames)]
-    assert records[0]["stream"] == binance.REST_DEPTH_STREAM
-    assert {record["stream"] for record in records[1:]} == {
+    assert _kinds(records) == ["frame", "snapshot", *["frame"] * (len(frames) - 1)]
+    assert records[1]["stream"] == binance.rest_depth_stream("BTCUSDT")
+    assert {r["stream"] for i, r in enumerate(records) if i != 1} == {
         binance.stream_name("BTCUSDT", 100)
     }
 
     # Verbatim: the payload round-trips to the same object the venue sent, and
     # the frames are in arrival order with a contiguous capture seq.
-    assert [payload_of(r) for r in records[1:]] == [json.loads(t) for t in frames]
+    landed = [r for i, r in enumerate(records) if i != 1]
+    assert [payload_of(r) for r in landed] == [json.loads(t) for t in frames]
     assert [record["seq"] for record in records] == list(range(1, len(records) + 1))
+
+
+def test_a_shard_tags_every_symbols_snapshot_apart(
+    monkeypatch: pytest.MonkeyPatch,
+    frames: list[str],
+    snapshot_payload: dict[str, Any],
+) -> None:
+    """Two symbols on one socket, and two distinguishable REST snapshots.
+
+    The tag was a single constant until Phase 3, which was enough while a
+    connection carried one book. It is not enough now: a replay reading a
+    shard's capture has to know which book each snapshot describes, and the
+    only thing on the record that can say so is `stream`.
+    """
+    eth = [json.dumps({**json.loads(text), "s": "ETHUSDT"}) for text in frames[:3]]
+    records, http = _run(
+        monkeypatch,
+        [*frames[:3], *eth],
+        [snapshot_payload, snapshot_payload],
+        symbols=("BTCUSDT", "ETHUSDT"),
+    )
+
+    assert http.calls == 2, "one initial snapshot per symbol, not one per shard"
+    snapshots = [r["stream"] for r in records if r["kind"] == "snapshot"]
+    assert snapshots == [
+        binance.rest_depth_stream("BTCUSDT"),
+        binance.rest_depth_stream("ETHUSDT"),
+    ]
+    assert {r["stream"] for r in records if r["kind"] == "frame"} == {
+        binance.stream_name("BTCUSDT", 100),
+        binance.stream_name("ETHUSDT", 100),
+    }
 
 
 def test_a_stale_snapshot_is_refetched_rather_than_waited_out(
@@ -153,7 +196,7 @@ def test_a_stale_snapshot_is_refetched_rather_than_waited_out(
     assert http.calls == 2
     # The refetch lands after the frame that proved the first one too old, so
     # a replay sees the same evidence in the same order the source did.
-    assert _kinds(records)[:3] == ["snapshot", "frame", "snapshot"]
+    assert _kinds(records)[:4] == ["frame", "snapshot", "frame", "snapshot"]
 
 
 def test_a_socket_skip_fetches_a_snapshot_so_the_capture_stays_replayable(
@@ -173,8 +216,10 @@ def test_a_socket_skip_fetches_a_snapshot_so_the_capture_stays_replayable(
 
     assert http.calls == 2
     assert _kinds(records) == [
+        # frames[0] lands, then the initial snapshot it triggered.
+        "frame",
         "snapshot",
-        *["frame"] * 5,
+        *["frame"] * 4,
         # frames[6] broke the chain: it lands, then the snapshot follows it.
         "frame",
         "snapshot",
@@ -209,7 +254,7 @@ def test_a_rejected_subscription_fails_the_run_instead_of_going_quiet(
     ctx = RunContext.create(source_name="test", http=cast(HttpClient, _FakeHttp([])))
     source = FrameSource(
         venue=_QuietVenue(),
-        symbol="XBT/USD",
+        symbols=["XBT/USD"],
         duration_s=0.2,
     )
 

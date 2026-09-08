@@ -309,6 +309,10 @@ class KrakenAdapter:
         data = payload["data"]
         return self.stream_tag(str(data[0]["symbol"])) if data else None
 
+    def sequence_key(self, symbol: str) -> str:
+        """The symbol: the CRC32 is over *this* book's top ten and no other."""
+        return symbol.upper()
+
     def sequence_ids(self, payload: Mapping[str, Any]) -> tuple[int, int]:
         """The counter as it stands. A read, never a write — see `observe`."""
         return self._seq, self._seq
