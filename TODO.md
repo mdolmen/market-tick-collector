@@ -80,29 +80,27 @@ is a legal `Source` and `WorkerApp` ran it untouched, so Phase 0 needed **zero**
 - [x] Stagger connection opens so Binance's 24h expiry never synchronises the shards
 - [ ] Make-before-break at ~23h — moved to Phase 4; break-before-make ships here
 - [x] Stagger the REST snapshot storm after any multi-book recovery, against the rate limit
-- [ ] Measure convergence after the venue's own daily disconnect — moved to Phase 4
 - [x] Demultiplex a shard's records into one book per symbol
 - [x] Judge connection-scoped continuity per connection, not per book
 
 ## Phase 4 · SDK extension: `ServiceApp` + streaming primitives
 
-- [ ] Make-before-break at ~23h: open the replacement, bootstrap it, then cut over
-- [ ] Measure convergence after the venue's own daily disconnect; report it separately
-- [ ] ClickHouse spike **first** — the sink contract below is designed for its insert path
-- [ ] Load a day of Phase 1 capture; pick the MergeTree sort key and partitioning
-- [ ] One row per price level at 10⁷/day makes that ordering load-bearing, so measure it
-- [ ] Measure insert throughput at realistic batch sizes; that number sets the flush triggers
-- [ ] `ServiceApp` in `data-pipeline-core`: run until stopped, health endpoint, graceful drain
-- [ ] Periodic metrics push — `WorkerApp` pushes in the `finally` of `run()`, useless here
-- [ ] Batch-oriented `Sink`: size/time flush triggers, defined fate for the partial batch
+- [ ] ~~Make-before-break at ~23h~~ — skipped; break-before-make measured 0 gaps in Phase 3
+- [x] ClickHouse spike **first** — the sink contract below is designed for its insert path
+- [x] Load a day of Phase 1 capture; pick the MergeTree sort key and partitioning
+- [x] One row per price level at 10⁷/day makes that ordering load-bearing, so measure it
+- [x] Measure insert throughput at realistic batch sizes; that number sets the flush triggers
+- [x] `ServiceApp` in `data-pipeline-core`: run until stopped, health endpoint, graceful drain
+- [x] Periodic metrics push — `WorkerApp` pushes in the `finally` of `run()`, useless here
+- [x] Batch-oriented `Sink`: size/time flush triggers, defined fate for the partial batch
+- [x] `RunContext` carries a metrics handle, and the registry a consumer can add its own to
+- [x] Clock-difference histogram labelled by venue, deferred from Phase 2
+- [x] `price_ticks` needs 128 bits; `Int64` cannot hold a tick at `SCALE = 8`
 - [ ] Connection supervisor primitive: N connections, per-connection health, no shared fate
 - [ ] Bounded queue primitive with high and low watermarks, not a single threshold
 - [ ] Checkpoint protocol over an opaque token — this consumer's answer is "nothing"
-- [ ] `RunContext` carries a metrics handle — nothing in a `Source` or `Transform` can export a series today, which is why Phase 2 measures clock difference but cannot push it
-- [ ] Clock-difference histogram labelled by venue, deferred from Phase 2
 - [ ] New series `messages_dropped_total`, `queue_depth`, drop reason — a deliberate §8 change
 - [ ] Label them `queue="ring"|"batch"`; `stage` is already taken by the SDK and frozen
-- [ ] Benchmark reader-thread + ring buffer against a pure-asyncio receiver; keep the numbers
 
 ## Phase 5 · Backpressure
 
@@ -138,9 +136,9 @@ is a legal `Source` and `WorkerApp` ran it untouched, so Phase 0 needed **zero**
 - [ ] Receive-to-disk p50 / p90 / p99 — deferred from Phase 0, meaningless before this sink
 - [ ] Pin the landed column schema: dlt drops an all-null column, so files in one dataset
       disagree and a naive per-file read fails (seen in Phase 0 on `exchange_ts`)
-- [ ] ClickHouse as the primary sink
+- [x] ClickHouse as the primary sink
 - [ ] Rotating Parquet on GCS partitioned by `date/symbol` as the archive tier
-- [ ] Retention and tiering rule sized for 10⁷ rows/day
+- [ ] Retention and tiering rule sized for 10⁹ rows/day
 - [ ] Idempotent writes across restart via deterministic ids — a replayed batch cannot duplicate
 
 ## Phase 8 · Reconciliation
