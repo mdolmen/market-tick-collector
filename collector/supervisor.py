@@ -218,11 +218,15 @@ class ShardSupervisor:
         self, ctx: RunContext, deadline: float, threads: list[threading.Thread]
     ) -> Iterator[CaptureRecord]:
         while True:
+            # Checked before the read, not only when the queue runs dry. A
+            # bounded run always drains to empty eventually and so never
+            # noticed; a service under sustained load never does, and a
+            # SIGTERM it only reads between records is a SIGTERM it ignores.
+            if time.monotonic() >= deadline or ctx.should_stop():
+                return
             try:
                 record = self._queue.get(timeout=_DRAIN_SLICE_S)
             except Empty:
-                if time.monotonic() >= deadline or ctx.should_stop():
-                    return
                 if not any(thread.is_alive() for thread in threads):
                     return
                 continue
