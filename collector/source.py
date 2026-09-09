@@ -567,6 +567,16 @@ class FrameSource:
         fetch window for updates to be lost in — so only the skip and the
         interval can fire, and both resolve to a resubscribe.
         """
+        if symbol in self._pending:
+            # A fetch is already in flight for this symbol. Nothing it could
+            # say has arrived yet, so asking again can only re-answer the same
+            # question with the same state — and the refetch budget below is
+            # spent in milliseconds rather than over the stalls it exists for.
+            # Inline fetching hid this: the state was always current by the
+            # time the next frame arrived. Measured once the fetch moved to its
+            # own thread: five identical "snapshot too old" warnings 20ms apart
+            # on the same unchanged pair of sequence numbers, then a dead shard.
+            return False
         key = self._keys[symbol]
         state = self._states[key]
         if state.first_seq_since_snapshot is None:
