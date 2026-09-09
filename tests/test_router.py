@@ -25,6 +25,8 @@ from data_pipeline_core import RunContext
 from data_pipeline_core.ingestion.http import HttpClient
 
 from collector.adapters import build_router
+from collector.adapters.base import VenueAdapter
+from collector.adapters.coinbase import CoinbaseAdapter
 from collector.book import Book
 from collector.capture import CaptureRecord
 from collector.settings import CollectorSettings
@@ -120,7 +122,5 @@ def test_a_tag_nobody_subscribed_to_is_counted_not_swallowed() -> None:
     assert router.unrouted == 1  # type: ignore[attr-defined]
 
 
-def _lone_adapter() -> object:
-    from collector.adapters.coinbase import CoinbaseAdapter
-
+def _lone_adapter() -> VenueAdapter:
     return CoinbaseAdapter()
