@@ -221,6 +221,50 @@ def test_a_full_queue_drops_and_latches_a_repair(
     assert records, "and the run still produces records rather than stalling"
 
 
+def test_a_busy_drain_still_honours_a_stop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`ctx.should_stop` is read before every queue read, not only on an empty one.
+
+    A bounded run always reaches an empty queue eventually, so checking there
+    was enough and the bug was invisible. A service under sustained load never
+    does: with the check inside the `Empty` branch, a SIGTERM arriving while
+    records keep coming is a SIGTERM that never lands, and `ServiceApp` waits
+    on a drain that has no reason to end.
+    """
+    monkeypatch.setattr(
+        source_module,
+        "connect",
+        _Factory({s[0]: [_Script(_messages(s[0], 400))] for s in _SHARDS}),
+        raising=True,
+    )
+    sources = [
+        FrameSource(
+            venue=partial(KrakenAdapter, depth=10, ws_url=_url(shard[0])),
+            symbols=shard,
+            duration_s=30.0,  # far longer than the stop this test asserts
+            subscribe_grace_s=30.0,
+        )
+        for shard in _SHARDS
+    ]
+    supervisor = ShardSupervisor(sources=sources, duration_s=30.0, backoff_base_s=0.01)
+
+    stop = False
+    ctx = RunContext.create(
+        source_name="test",
+        http=cast(HttpClient, None),
+        should_stop=lambda: stop,
+    )
+
+    started = time.monotonic()
+    records = []
+    for record in supervisor.fetch(ctx):
+        records.append(record)
+        if len(records) == 20:
+            stop = True
+
+    assert records, "the run produced records before it was stopped"
+    assert time.monotonic() - started < 25.0, "the stop was honoured, not the deadline"
+
+
 def test_a_dropped_record_marks_its_symbol_for_repair() -> None:
     """The `dropped` hook on its own, without the timing of a real overflow."""
     source = FrameSource(
