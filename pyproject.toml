@@ -24,6 +24,8 @@ dev = [
     # bench/decode.py — the two decoders measured against the stdlib baseline.
     "orjson>=3.10",
     "msgspec>=0.18",
+    # bench/clickhouse.py — the spike that sizes the Phase 7 sink.
+    "clickhouse-connect>=0.8",
 ]
 
 [tool.ruff]
