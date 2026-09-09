@@ -53,6 +53,7 @@ configured destination, not a single file.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 
 from data_pipeline_core import (
@@ -116,6 +117,17 @@ def resolve_shards(settings: CollectorSettings) -> tuple[tuple[str, ...], ...]:
     return plan_shards(symbols, RATES.get(settings.venue, {}), max_per_shard=size)
 
 
+def _duration(settings: CollectorSettings) -> float:
+    """How long a run lasts — and a service does not.
+
+    ``duration_s`` bounds every other mode; in ``service`` the run ends on a
+    signal instead, so the deadline has to be one that never arrives. Passing
+    the configured value would make a service stop after a minute, and passing
+    zero would make it stop at once.
+    """
+    return math.inf if settings.mode == "service" else settings.duration_s
+
+
 def _shard_sources(settings: CollectorSettings) -> list[FrameSource]:
     return [
         FrameSource(
@@ -123,7 +135,7 @@ def _shard_sources(settings: CollectorSettings) -> list[FrameSource]:
             # `sequence_key`, and those must not share state.
             venue=lambda: adapters.build(settings),
             symbols=shard,
-            duration_s=settings.duration_s,
+            duration_s=_duration(settings),
             snapshot_interval_s=settings.snapshot_interval_s,
             subscribe_grace_s=settings.subscribe_grace_s,
             liveness_timeout_s=settings.liveness_timeout_s,
@@ -141,7 +153,7 @@ def _source(settings: CollectorSettings) -> ShardSupervisor:
     """
     return ShardSupervisor(
         sources=_shard_sources(settings),
-        duration_s=settings.duration_s,
+        duration_s=_duration(settings),
         stagger_s=settings.shard_stagger_s,
         queue_maxsize=settings.queue_maxsize,
         rotate_after_s=settings.rotate_after_s,
