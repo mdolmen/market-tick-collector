@@ -46,6 +46,7 @@ from collector.adapters.base import (
 )
 from collector.book import Book
 from collector.capture import CaptureRecord, payload_of
+from collector.metrics import clock_difference
 from collector.model import LevelRow, Side
 
 # How often the book invariant (best bid < best ask) is checked. Both reads are
@@ -166,7 +167,13 @@ class BookTransform:
         )
         self.frames += 1
         if event.exchange_ts is not None:
-            self._skews.append(event.receive_ts - event.exchange_ts)
+            difference = event.receive_ts - event.exchange_ts
+            self._skews.append(difference)
+            # Exported as well as summarised: `skew_ms` is one distribution per
+            # run and a service has no end of run to report at.
+            clock_difference(ctx.metrics.registry).labels(
+                venue=self._adapter.venue
+            ).observe(difference / 1e9)
 
         if not self._live:
             self.untrusted_frames += 1
