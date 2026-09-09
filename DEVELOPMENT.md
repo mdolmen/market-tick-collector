@@ -666,3 +666,123 @@ so nothing in the recording can repair it. That is `_interval_elapsed`'s documen
 limitation rather than a convergence failure: an injected fault removes frames from a
 recording but cannot conjure the repair snapshot a live source would have fetched. On the
 live path the source resubscribes on the failing checksum itself, within one message.
+
+---
+
+## Phase 4 — ClickHouse, the batch sink, and a service to run them
+
+### The prediction, and where it came from
+
+This phase's predictions were not written for it. They were already in `TODO.md`, from
+before Phase 3 existed, and both are load-bearing:
+
+- **"One row per price level at 10⁷/day makes that ordering load-bearing, so measure it."**
+- **"Measure insert throughput at realistic batch sizes; that number sets the flush
+  triggers."**
+
+Both are wrong, in opposite directions, and the second is the more interesting failure.
+
+### A day is 10⁹ rows, not 10⁷
+
+`bench/volume.py` replays a Phase 3 capture through `BookRouter` and counts rows by action.
+Snapshot rows are reported apart from diff rows and only the diffs are extrapolated: a
+bootstrap emits the whole book — ~370k rows to bring 185 Kraken books up at depth 1000 — so
+a capture that reconnected a few times is mostly bootstrap by row count, and dividing total
+rows by the span would measure the session's shape rather than the venue's rate.
+
+| venue | span | symbols | set | delete | snapshot | diff rows/s | diff rows/day |
+|---|---|---|---|---|---|---|---|
+| binance | 717s | 181 | 686,579 | 113,514 | 549,582 | 1,116 | 96,385,181 |
+| coinbase | 149s | 188 | 582,490 | 241,346 | 371,516 | 5,535 | 478,194,752 |
+| kraken | 149s | 184 | 609,173 | 198,587 | 113,287 | 5,404 | 466,862,749 |
+
+**~10⁹ diff rows/day across the three, two orders of magnitude above the figure the schema
+was to be sized against.** The 10⁷ estimate was written when a run carried one symbol; 188
+symbols on three venues is simply a different problem, and every downstream number —
+retention, the archive tier, the read layer's partition pruning — inherits the correction.
+
+One bug found in writing it, worth keeping because it inflates nothing and deflates a lot:
+a raw-landing channel accumulates **one file per run**, so first-to-last across the
+directory spans every idle hour between sessions. `binance-p3` read as 6439 seconds of
+capture for 289k records that arrived in three short bursts, understating its rate 6x.
+Spans are summed per file.
+
+### The sort key: `(venue, symbol, receive_ts, seq)`
+
+`bench/clickhouse.py` loads ten million identical rows — real rows from a Phase 3 capture,
+tiled forward in time — into two MergeTrees that differ only in `ORDER BY`, both partitioned
+`toDate(receive_ts)`.
+
+| candidate | on disk | bytes/row | one symbol, one minute | whole load, by symbol |
+|---|---|---|---|---|
+| `(receive_ts, venue, symbol)` | 344 MB | 34.4 | 458,752 rows read | 10,000,000 rows read |
+| `(venue, symbol, receive_ts, seq)` | **258 MB** | **25.8** | **16,385 rows read** | 10,000,000 rows read |
+
+Rows read rather than wall time, because on a warm single node wall time mostly measures the
+page cache. Instrument-time wins 25% on storage and 28x on the point read, and loses nothing
+on the full scan — both read everything, as a full scan should.
+
+The bytes/row figures are **optimistic and not a storage claim**: a tiled day repeats one
+price series and compresses better than a real one would. The ranking survives that; the
+absolute number does not, and does not belong in the README.
+
+A third candidate, `(venue, symbol, side, price_ticks, receive_ts)`, was dismissed without
+loading it. It needs `allow_nullable_key` — `side` and `price_ticks` are null on control
+rows — and it scatters every time-range read across the partition.
+
+### `Int64` cannot hold a scaled tick
+
+Found by the loader refusing a row, not by reading the model. `SCALE = 8` puts the Int64
+ceiling at about 9.2e10, and Kraken's depth-1000 `BCH/USD` book carries an ask at
+**886,110,000,000.00** — a junk order parked far from the touch, entirely real, 8.9e19 once
+scaled. Python's int is unbounded and every test to date used one symbol near the touch, so
+nothing had put a tick into a fixed-width column before.
+
+`price_ticks` and `size_lots` are `Decimal(38, 0)` — a 128-bit integer — at 16 bytes a value
+instead of 8. The alternative was `Int64` plus a refused row, which means one junk order on
+one symbol killing a run. `scaled_int` already refuses to truncate rather than corrupt a book
+key; widening the column is the same trade on the other side of the pipeline.
+
+### Insert throughput does not set the flush triggers
+
+| batch | rows/s | active parts after | rows/part |
+|---|---|---|---|
+| 10,000 | 881,063 | 13 | 153,846 |
+| 50,000 | 1,154,997 | 8 | 250,000 |
+| 250,000 | 1,223,083 | 8 | 250,000 |
+| 1,000,000 | 1,173,221 | 2 | 1,000,000 |
+
+The TODO said this number would set the triggers. **It does not, and the reason is the
+finding.** The worst batch size measured sustains 881k rows/s against a measured multi-venue
+arrival of ~12,000 rows/s — 70x headroom at *every* size, so throughput does not discriminate
+between them at all. What does is latency: a batch is buffered rows, and buffered rows are
+staleness. The triggers are therefore a latency choice, and `batch_max_rows` is only the
+ceiling that bounds memory during a burst.
+
+Defaults: **50,000 rows / 2.0 seconds**. At ~12,000 rows/s the time trigger fires first, at
+roughly 24k rows and 43k inserts a day — comfortably inside what the parts column above says
+the server merges away.
+
+### Verification
+
+45s live service run, Kraken, four symbols at depth 100, into the local node:
+
+- 22,380 rows in ClickHouse, and `BookRouter` counted **22,380** — the partial batch at drain
+  was written exactly once, which is the property the batch contract exists to promise
+- 0 drops, 0 reconnects, 0 gaps, 0 crossed books, 4 books live at exit, 0 unrouted
+- `/healthz` 200 from the first moment; `/readyz` 200 once records were flowing
+- SIGTERM drained rather than truncated
+- A second run at a 4s push interval: 6 pushes in 22s — five periodic and one at exit, which
+  is the whole point of the archetype
+
+### Two bugs the service surfaced that a bounded run could not
+
+Both were invisible for the same reason: a bounded run always ends.
+
+- **The drain read the stop flag only when the queue was empty.** `ShardSupervisor._drain`
+  checked `ctx.should_stop()` inside the `Empty` branch. A bounded run reaches an empty queue
+  eventually so it always noticed; a service under sustained load never does, and a SIGTERM
+  arriving while records keep coming would never have landed.
+- **A service ran for `duration_s` and stopped.** The supervisor's deadline is
+  `monotonic() + duration_s`, and the first service run exited immediately because the
+  duration passed to it was zero. A service's deadline has to be one that never arrives.
