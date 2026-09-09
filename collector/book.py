@@ -1,11 +1,15 @@
 """The reconstructed L2 book: one ``dict`` per side, keyed by integer ticks.
 
 ``dict`` is the decision recorded in ``NOTES.md`` § *Book representation*, taken
-against a sorted array and a fixed-width ticks-from-mid array — and it is a
-decision Phase 6 benchmarks rather than assumes. What that benchmark has to
-measure is the *read*: ``best_bid_ask`` below is an O(n) scan of every level,
-while applying a diff is a point mutation and is cheap under all three
-candidates. Benchmarking the write picks the wrong structure.
+against a sorted array and a fixed-width ticks-from-mid array — **on reasoning,
+not on a measurement.** The benchmark that would have settled it was cut in the
+September 2026 re-scope (``NOTES.md`` § *Re-scope*), so this is the one
+structural choice in the collector that ships without a number behind it.
+
+What that benchmark would have had to measure is the *read*: ``best_bid_ask``
+below is an O(n) scan of every level, while applying a diff is a point mutation
+and is cheap under all three candidates. Benchmarking the write picks the wrong
+structure. If the read ever lands on a hot path, that is the experiment.
 """
 
 from __future__ import annotations

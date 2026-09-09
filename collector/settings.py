@@ -89,7 +89,7 @@ class CollectorSettings(Settings):
     # How often to land a snapshot even when the sequence is healthy. It makes
     # a capture recoverable from an *injected* fault (which removes frames but
     # cannot conjure the repair snapshot a live source would have fetched), and
-    # it is what Phase 8's periodic REST oracle reads. Zero disables it.
+    # it is what Phase 6's periodic REST oracle reads. Zero disables it.
     snapshot_interval_s: float = 300.0
 
     # Endpoints live on the adapter, which is where a venue's transport

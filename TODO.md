@@ -1,14 +1,5 @@
 # Market Tick Collector — TODO
 
-Rationale, decisions and design notes: [NOTES.md](NOTES.md)
-
-Decided in the notes and assumed throughout: three venues (Binance, Coinbase, Kraken),
-full-depth diff channels, one book per `(venue, symbol)` held in a `dict`, reader per
-connection into a bounded ring buffer, periodic metrics push, cold rebuild on restart,
-ClickHouse as the primary sink.
-
----
-
 ## Phase 0 · Walking skeleton
 
 - [x] uv project as a `data-pipeline-core` consumer: `collector/`, ruff + `mypy --strict`
@@ -17,7 +8,7 @@ ClickHouse as the primary sink.
 - [x] Dump raw frames verbatim to `.jsonl`, feeding the decode benchmark and Phase 1's replay
 - [x] Benchmark decode early: `json` vs `orjson` vs `msgspec.json` with a typed schema
 - [x] Measure msg/s and **in-process** p99 — receive → book applied → row built — and commit it
-- [x] Write the architecture prediction down now, so Phase 9 can prove it wrong
+- [x] Write the architecture prediction down now, so Phase 7 can prove it wrong
 
 Receive-to-disk p99 moved to Phase 7: one `sink.write()` at the end of a bounded run lands
 every row at once, so the number would describe the run's shape and not the pipeline's. The
@@ -56,7 +47,8 @@ is a legal `Source` and `WorkerApp` ran it untouched, so Phase 0 needed **zero**
 - [x] Capture `exchange_ts`, `receive_ts`, `monotonic_ts`, one unit (ns) throughout
 - [x] Parse RFC3339 fractions directly — `fromisoformat` truncates ns to µs in silence
 - [x] Measure the venue-to-local clock difference per venue and commit the number
-- [ ] Export it as a metric — needs `RunContext` to carry one; Phase 4
+- [x] Export it as a metric — needs `RunContext` to carry one; shipped in Phase 4 as
+      `venue_clock_difference_seconds`, see `collector/metrics.py`
 
 ## Phase 2.5 · Kraken
 
@@ -97,43 +89,41 @@ is a legal `Source` and `WorkerApp` ran it untouched, so Phase 0 needed **zero**
 - [x] Clock-difference histogram labelled by venue, deferred from Phase 2
 - [x] `price_ticks` needs 128 bits; `Int64` cannot hold a tick at `SCALE = 8`
 - [ ] Connection supervisor primitive: N connections, per-connection health, no shared fate
-- [ ] Bounded queue primitive with high and low watermarks, not a single threshold
-- [ ] Checkpoint protocol over an opaque token — this consumer's answer is "nothing"
 - [ ] New series `messages_dropped_total`, `queue_depth`, drop reason — a deliberate §8 change
 - [ ] Label them `queue="ring"|"batch"`; `stage` is already taken by the SDK and frozen
+- [ ] Drop the bounded-queue and checkpoint items from `data-pipeline-core`'s TODO too
 
-## Phase 5 · Backpressure
+## Phase 5 · Backpressure — cut
 
-- [ ] Never block the socket read — the reader drains at line rate under all conditions
-- [ ] Ring buffer drops whole frames only; a partial frame is undetectable corruption
-- [ ] Emit every drop as a `gap` control record so recovery and replay both see it
-- [ ] Shed whole symbols under sustained pressure, never scattered messages
-- [ ] Batch queue spills to disk and must never push back on the ring
-- [ ] Measure peak arrival, p99 burst duration and sustained service rate first
-- [ ] Size each queue as min(burst floor, latency ceiling); floor above ceiling = fix capacity
-- [ ] Powers of two for the ring so the index wraps with a mask
-- [ ] Load past the drop threshold deliberately; document the policy and the measured number
+- [x] Never block the socket read — `ShardSupervisor._enqueue`, shipped in Phase 3
+- [x] Drops whole frames only; a partial frame is undetectable corruption
+- [x] Every drop counted and latched as a repair, visible to recovery and replay
 
 ## Phase 6 · Book reconstruction & consistency
 
-- [ ] One book per `(venue, symbol)`, a `dict` keyed by price (decided)
-- [ ] Benchmark it against sorted-array and ticks-from-mid at a realistic read:write ratio
-- [ ] Measure the hot read — best bid/ask — not just diff application
-- [ ] The checksum stays out of it: it reads decimal strings, `Book` holds ticks. Kraken's per-frame ordered read is on the adapter's own view, already measured
-- [ ] Bootstrap splice: buffer first, snapshot second, find the event straddling `lastUpdateId`
-- [ ] Distinguish snapshot-too-old (refetch) from buffer-behind (keep waiting)
-- [ ] Sizes are absolute set-to-value, never increments; zero is the only deletion signal
-- [ ] `(venue, symbol)` state machine: DISCONNECTED → BUFFERING → SYNCING → LIVE ⇄ GAPPED
-- [ ] Mark the book untrusted on gap *before* repairing it, with both edges in the data
-- [ ] Emit `snapshot` and `gap` as control records so replay reproduces the transitions
-- [ ] Cold rebuild on restart — no durable book state, the venue is the source of truth
-- [ ] Exercise recovery with the fault injector; assert convergence after re-snapshot
+- [x] One book per `(venue, symbol)`, a `dict` keyed by price (decided)
+- [x] The checksum stays out of it: it reads decimal strings, `Book` holds ticks. Kraken's per-frame ordered read is on the adapter's own view, already measured
+- [x] Bootstrap splice: buffer first, snapshot second, find the event straddling `lastUpdateId`
+- [x] Distinguish snapshot-too-old (refetch) from buffer-behind (keep waiting)
+- [x] Sizes are absolute set-to-value, never increments; zero is the only deletion signal
+- [x] `(venue, symbol)` state machine: BUFFERING → SYNCING → LIVE, gap returns to BUFFERING.
+- [x] Mark the book untrusted on gap *before* repairing it, with both edges in the data
+- [x] Emit `snapshot` and `gap` as control records so replay reproduces the transitions
+- [x] Cold rebuild on restart — no durable book state, the venue is the source of truth
+- [x] Exercise recovery with the fault injector; assert convergence after re-snapshot
+- [ ] Oracle: reconstructed book vs venue REST snapshot, periodic, all three venues.
+      `snapshot_interval_s` already lands the snapshots it reads
+- [ ] Compare only where the book is `live`; an untrusted book measures where it stopped
+- [ ] Report its break count, and the Kraken CRC32 break count, as two numbers
 
 ## Phase 7 · Storage
 
 - [ ] `BatchSink[ArrowBatch]` contract in `data-pipeline-core`
 - [ ] Arrow `RecordBatch` accumulation, flush on size or time
 - [ ] Receive-to-disk p50 / p90 / p99 — deferred from Phase 0, meaningless before this sink
+- [ ] Sustained throughput and burst capacity at full shard scale, from the same run
+- [ ] Live rate and replay ceiling reported apart, both labelled
+- [ ] Compare against the Phase 0 architecture prediction, whichever way it went
 - [ ] Pin the landed column schema: dlt drops an all-null column, so files in one dataset
       disagree and a naive per-file read fails (seen in Phase 0 on `exchange_ts`)
 - [x] ClickHouse as the primary sink
@@ -141,48 +131,20 @@ is a legal `Source` and `WorkerApp` ran it untouched, so Phase 0 needed **zero**
 - [ ] Retention and tiering rule sized for 10⁹ rows/day
 - [ ] Idempotent writes across restart via deterministic ids — a replayed batch cannot duplicate
 
-## Phase 8 · Reconciliation
+## Phase 8 · Reconciliation — cut
 
-- [ ] Oracle 1: reconstructed book vs venue REST snapshot, periodic
-- [ ] Oracle 2: venue's own depth-limited top-N, continuous, on audited symbols
-- [ ] Not on Kraken: a second depth per symbol is refused on one connection. A second
-      connection might carry it — that is Phase 3's call
-- [ ] Align oracle 2 by update id, never by clock; keep a ring of recent top-N versions
-- [ ] Compare the top N−1 levels to avoid the truncation boundary artifact
-- [ ] Oracle 3: replay harness injected faults; target detection of 100%
-- [ ] Kraken CRC32 as a fourth, venue-native check — built in Phase 2.5, not here, because
-      it is that venue's only gap detection rather than an extra oracle
-- [ ] It already runs per message; this phase counts and reports its breaks
-- [ ] Break classification: missing, duplicate, value mismatch, timing
-- [ ] Configurable tolerance rules, break report, idempotent re-run
-- [ ] Report every oracle's break count separately, never merged into one number
+- [x] Kraken CRC32 as a venue-native check — built in Phase 2.5; the REST oracle is Phase 6
 
-## Phase 9 · Benchmark harness & profiling
+## Phase 9 · Read layer
 
-- [ ] Committed, reproducible benchmark suite
-- [ ] Sustained throughput and burst capacity, live rate and replay ceiling kept apart
-- [ ] Receive-to-disk p50 / p90 / p99
-- [ ] Memory allocation and GC pause impact during volume spikes
-- [ ] Compare the result against the Phase 0 prediction, whichever way it went
-- [ ] Flamegraph before and after one profiling-driven optimisation
-- [ ] Bounded cache over `scaled_int` — 6.2x in Phase 0, but distinct sizes grow linearly,
-      so it needs a size bound and an eviction policy sized against a long capture
-- [ ] Kraken parses its levels twice per frame in the transform — `observe` and
-      `parse_frame`. Left for a profile rather than a guess
-
-## Phase 10 · Read layer
-
-- [ ] Research access API: point-in-time correct reads, returns Arrow/Polars, hides partitioning
-- [ ] Query surface: DuckDB over the lake, or ClickHouse SQL
+- [ ] `DatasetReader` protocol in `data-pipeline-core`: returns Arrow, hides partitioning
+- [ ] ClickHouse implementation, sized against the `ORDER BY` chosen in Phase 4
+- [ ] Parquet/DuckDB implementation over the GCS archive tier
+- [ ] Consumer-side helper: one symbol over one time window, returning Arrow.
 
 ## Docs
 
 - [ ] README leading with numbers
 - [ ] Architecture diagram
-- [ ] Flamegraphs
-- [ ] Trade-off justifications, each with the measurement behind it
 - [ ] The normalization boundary, and the one place it leaks
-
-## Stretch — only if the core lands
-
-- [ ] nanobind/pybind11 hot-path kernel, only after profiling proves the hotspot
+- [ ] The SDK diff: what `ServiceApp` forced, and which abstractions survived intact

@@ -622,7 +622,7 @@ class FrameSource:
         periodic snapshots a fault-injected replay can detect a gap and never
         converge, and convergence is half of what the harness exists to prove.
 
-        The second reason is Phase 8's Oracle 1 — reconstructed book against
+        The second reason is Phase 6's oracle — reconstructed book against
         the venue's periodic REST snapshot — which needs exactly this in the
         capture and would otherwise force a second pass over the venue.
         """
