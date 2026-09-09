@@ -8,6 +8,9 @@ requires-python = ">=3.11"
 dependencies = [
     "data-pipeline-core",
     "websockets>=13",
+    # The curated sink. Phase 4 measured its insert path before the sink
+    # contract was written; see bench/clickhouse.py.
+    "clickhouse-connect>=0.8",
 ]
 
 # Co-development: depend on the SDK via an editable local path while both repos
@@ -24,8 +27,6 @@ dev = [
     # bench/decode.py — the two decoders measured against the stdlib baseline.
     "orjson>=3.10",
     "msgspec>=0.18",
-    # bench/clickhouse.py — the spike that sizes the Phase 7 sink.
-    "clickhouse-connect>=0.8",
 ]
 
 [tool.ruff]

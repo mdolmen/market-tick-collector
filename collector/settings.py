@@ -103,14 +103,21 @@ class CollectorSettings(Settings):
     destination: str = "filesystem"
 
     # "console" prints the level rows instead of landing them — for eyeballing
-    # a live run before wiring storage.
-    output: Literal["parquet", "console"] = "parquet"
+    # a live run before wiring storage. "clickhouse" is the curated sink, and
+    # goes through the SDK's `batching_sink` rather than writing per record.
+    output: Literal["parquet", "console", "clickhouse"] = "parquet"
 
-    # Which of the three wirings of the same two pieces to run:
+    # The local node `compose.yaml` brings up. A deployment points this at a
+    # managed service; nothing else changes.
+    clickhouse_dsn: str = "http://mtc:mtc@localhost:8123/mtc"
+    clickhouse_table: str = "levels"
+
+    # Which wiring of the same two pieces to run:
     #   collect  socket -> book -> level rows -> curated sink (the Phase 0 path)
     #   capture  socket -> raw landing, verbatim, no book at all
     #   replay   raw landing -> book -> level rows, no socket
-    mode: Literal["collect", "capture", "replay"] = "collect"
+    #   service  the collect wiring, run until stopped instead of for a duration
+    mode: Literal["collect", "capture", "replay", "service"] = "collect"
 
     # Where a capture lands and a replay reads from. The bucket falls back to
     # the SDK's own RAW_BUCKET_URL when unset, which is how a local

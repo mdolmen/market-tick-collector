@@ -1,14 +1,15 @@
-"""Entry point — three wirings of the same two pieces, nothing else to write.
+"""Entry point — four wirings of the same two pieces, nothing else to write.
 
     MTC_SYMBOL=BTCUSDT MTC_DURATION_S=60 uv run python -m collector.main
 
 Configuration comes from ``CollectorSettings`` (``MTC_*`` env vars, or a
 ``.env``); structured logging, the resilience stack behind ``ctx.http``,
-graceful shutdown and the metrics push all come from ``WorkerApp``.
+graceful shutdown and the metrics push all come from the SDK's app.
 
     MTC_MODE=collect     socket -> book -> level rows -> curated sink
     MTC_MODE=capture     socket -> raw landing, verbatim, no book
     MTC_MODE=replay      raw landing -> book -> level rows, no socket
+    MTC_MODE=service     the collect wiring, run until stopped
 
 ``collect`` and ``replay`` differ only in where the records come from — the
 same ``BookRouter`` builds the books either way, which is what makes a replay a
@@ -17,9 +18,15 @@ regression test of the collector rather than of a parallel implementation.
 A venue is still a process, and now a process is many connections.
 ``MTC_SYMBOLS`` names the set, ``collector/shard.py`` packs it onto as many
 sockets as the venue's cap and the recovery budget allow, and
-``ShardSupervisor`` runs them concurrently behind ``WorkerApp``'s one-source
-contract — which is therefore still untouched. Several *venues* at once remains
-a Phase 4 problem, because that needs ``ServiceApp``.
+``ShardSupervisor`` runs them concurrently behind the one-source contract —
+which is therefore still untouched.
+
+**``service`` is the same three objects as ``collect``.** ``ServiceApp`` swaps
+the run loop, not the pipeline: the supervisor already stops on
+``ctx.should_stop`` and already yields forever, so it was a legal service source
+before there was a service to run it. What ``collect`` cannot do is stop on a
+signal without losing the partial batch, push metrics more than once, or answer
+a health probe — and none of those are properties of the source.
 
 Key knobs:
 
@@ -31,7 +38,9 @@ Key knobs:
     MTC_QUEUE_MAXSIZE    records buffered before dropping (10000)
     MTC_ROTATE_AFTER_S   reconnect each shard this often  (0, off)
     MTC_DEPTH            Kraken book depth, 10..1000     (1000)
-    MTC_OUTPUT           parquet | console               (parquet)
+    MTC_OUTPUT           parquet | console | clickhouse  (parquet)
+    MTC_CLICKHOUSE_DSN   where the curated rows go
+    MTC_HEALTH_PORT      service mode's probe endpoint    (8080)
     MTC_RAW_CHANNEL      capture/replay channel name     (<venue>-depth)
     MTC_RAW_BUCKET_URL   where it lands (else RAW_BUCKET_URL)
     MTC_REPLAY_SPEED     1 / 10 / 100, or unset for the ceiling
@@ -47,8 +56,10 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from data_pipeline_core import (
+    ServiceApp,
     Sink,
     WorkerApp,
+    batching_sink,
     dlt_sink,
     raw_landing_sink,
 )
@@ -62,7 +73,7 @@ from collector.replay import FaultConfig, ReplaySource
 from collector.router import BookRouter
 from collector.settings import CollectorSettings
 from collector.shard import plan_shards, shard_size
-from collector.sinks import ConsoleSink
+from collector.sinks import ClickHouseSink, ConsoleSink
 from collector.source import FrameSource
 from collector.supervisor import ShardSupervisor
 from collector.symbols import tradable
@@ -140,6 +151,15 @@ def _source(settings: CollectorSettings) -> ShardSupervisor:
 def _row_sink(settings: CollectorSettings) -> Sink[LevelRow]:
     if settings.output == "console":
         return ConsoleSink()
+    if settings.output == "clickhouse":
+        # The flush triggers are SDK settings with defaults measured in
+        # `bench/clickhouse.py`; the sink itself only knows how to write a
+        # batch it is handed.
+        return batching_sink(
+            ClickHouseSink(settings.clickhouse_dsn, settings.clickhouse_table),
+            max_rows=settings.batch_max_rows,
+            max_seconds=settings.batch_max_seconds,
+        )
     return dlt_sink(
         dataset=settings.dataset,
         destination=settings.destination,
@@ -169,6 +189,18 @@ def build_collect_app(
     )
 
 
+def build_service_app(
+    settings: CollectorSettings, router: BookRouter
+) -> ServiceApp[CaptureRecord, LevelRow]:
+    """The collect wiring with no end to it: run until stopped, then drain."""
+    return ServiceApp(
+        _source(settings),
+        _row_sink(settings),
+        transform=router,
+        settings=settings,
+    )
+
+
 def build_replay_app(
     settings: CollectorSettings, router: BookRouter
 ) -> WorkerApp[CaptureRecord, LevelRow]:
@@ -189,10 +221,14 @@ def main() -> int:
 
     # The router is held here rather than inside the builder because its
     # counters and the books it ends with are the run's actual result, and
-    # ``WorkerApp.run()`` returns only an exit code.
+    # ``run()`` returns only an exit code.
     router, _ = adapters.build_router(settings, resolve_shards(settings))
-    build = build_collect_app if settings.mode == "collect" else build_replay_app
-    code = build(settings, router).run()
+    if settings.mode == "service":
+        code = build_service_app(settings, router).run()
+    elif settings.mode == "collect":
+        code = build_collect_app(settings, router).run()
+    else:
+        code = build_replay_app(settings, router).run()
     get_logger().info("books", mode=settings.mode, **router.summary())
     return code
 

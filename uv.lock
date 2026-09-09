@@ -1668,13 +1668,13 @@ name = "market-tick-collector"
 version = "0.0.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "clickhouse-connect" },
     { name = "data-pipeline-core" },
     { name = "websockets" },
 ]
 
 [package.dev-dependencies]
 dev = [
-    { name = "clickhouse-connect" },
     { name = "msgspec" },
     { name = "mypy" },
     { name = "orjson" },
@@ -1685,13 +1685,13 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "clickhouse-connect", specifier = ">=0.8" },
     { name = "data-pipeline-core", editable = "../data-pipeline-core" },
     { name = "websockets", specifier = ">=13" },
 ]
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "clickhouse-connect", specifier = ">=0.8" },
     { name = "msgspec", specifier = ">=0.18" },
     { name = "mypy", specifier = ">=1.11" },
     { name = "orjson", specifier = ">=3.10" },
