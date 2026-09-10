@@ -908,3 +908,81 @@ for first if it does:
 Predicting zero is a deliberate choice of a falsifiable number over a safe one. A prediction
 of "under 0.1%" would be unfalsifiable by this run and would have quietly excused exactly the
 bug the oracle exists to catch.
+
+### The measurement
+
+Binance spot, BTCUSDT and ETHUSDT on one shard, `snapshot_limit=5000`,
+`snapshot_interval_s=45`, captured live and then replayed — so the number below comes from a
+landed file and anyone can reproduce it from the same bytes.
+
+**479s live capture: 9,587 records, 20.0 msg/s, 0 drops, 0 reconnects, 0 snapshot failures.**
+50 snapshots landed, 2 of them spent on the bootstraps.
+
+Replayed:
+
+- **45 comparisons, 45 clean. 0 diverging levels in 446,830 compared.**
+- 0 gaps, 0 crossed books, 2 bootstraps, both books live at exit.
+- **3 comparisons unaligned** — 48 snapshots offered, 45 taken, so 93.8% coverage.
+- Two replays of the same capture produced identical counters, down to the per-symbol
+  breakdown. The oracle reads only what is in the file and touches no clock.
+
+Per symbol, because one healthy book can hide another:
+
+| | BTCUSDT | ETHUSDT |
+|---|---|---|
+| frames | 4,789 | 4,748 |
+| comparisons / clean | 29 / 29 | 16 / 16 |
+| levels compared | 288,435 | 158,395 |
+| levels broken | 0 | 0 |
+| unaligned | 1 | 2 |
+
+**What the 3 unaligned are, measured rather than assumed.** All three are the same condition
+— the snapshot was ahead of the book, by 4, 29 and 284 update ids. That is the REST read
+seeing the venue's book at a position the 100ms-batched diff stream had not delivered yet,
+which is a property of reading two surfaces of one venue and not a fault. Neither of the
+other two rejection conditions fired once: nothing was ever evicted from the 4096-frame
+ring, so its size is not a limitation at this rate.
+
+Those three are recoverable, and deliberately not recovered: holding the snapshot aside and
+comparing once the book reaches its id would take coverage to essentially 100%, at the cost
+of carrying a pending snapshot per symbol. 93.8% coverage with a stated reason is worth more
+than the extra state, and the reason is the kind that gets asked about.
+
+### Grading the prediction
+
+**Wrong, on the number that was predicted.** Zero was predicted and the first run measured
+173 broken levels in 40,001 — on a session with no gaps, which is the case the prediction
+called impossible.
+
+**Right on the alternative, including its signature.** The prediction named the bootstrap
+truncation floor as the way this could fail without the book being wrong, and said what to
+look for: breaks one-sided, concentrated at the deep end, growing with run length. The
+measurement was 173 breaks, **100% one-sided** (the snapshot had a level, the book did not),
+**zero size disagreements anywhere**, and every one of them ranked between 4927 and 4999 of
+5000 — the deepest 1.5% of the band. Bids clean, asks broken, because that is the way the
+price had moved.
+
+That signature is what makes this a diagnosis rather than a guess. A book that is genuinely
+wrong disagrees about *sizes*, on levels it was told about, near the mid. Not one level in
+40,001 did.
+
+The fix was the one the prediction had already named — floor the comparison band at the
+bootstrap snapshot's own extent as well as the current one — and on the *same capture* the
+number moved from 173 breaks in 40,001 levels to 0 in 39,828. The denominator fell by
+exactly 173, the count that had been breaking. That equality is the whole check: the fix
+removes levels the book could not know, rather than hiding levels it got wrong.
+
+**What predicting zero bought.** A prediction of "under 0.1%" would have been satisfied by
+the 0.43% — near enough to wave through — and the truncation artifact would have shipped
+inside the headline number, growing with every hour of run length, unnoticed because it
+looked like the small non-zero divergence everyone expects. The falsifiable prediction is
+what turned a plausible number into a diagnosis. The run that produced a non-zero number was
+worth more than the run that produced zero would have been.
+
+**What the number does and does not claim.** It says: over 446,830 level-comparisons against
+Binance's own REST book, at the depth both sides were authoritative over, the reconstruction
+did not differ once. It does not say anything about Coinbase, which has no id-alignable
+independent read (`NOTES.md` § *Why Coinbase has no oracle*); about Kraken, whose CRC32 is
+its own oracle and reported 0 breaks over the Phase 2.5 sessions; about depth beyond the top
+5000; or about a run long enough to see a gap — this one had none, so the oracle has not yet
+been exercised against a book that recovered.
