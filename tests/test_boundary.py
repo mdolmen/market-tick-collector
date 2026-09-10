@@ -27,6 +27,7 @@ _ADAPTERS = "collector.adapters"
 DOWNSTREAM = (
     "transform.py",
     "book.py",
+    "oracle.py",
     "model.py",
     "sinks.py",
     "capture.py",

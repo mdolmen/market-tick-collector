@@ -46,8 +46,13 @@ from collector.adapters.base import (
 )
 from collector.book import Book
 from collector.capture import CaptureRecord, payload_of
-from collector.metrics import clock_difference
+from collector.metrics import (
+    clock_difference,
+    oracle_comparisons,
+    oracle_level_breaks,
+)
 from collector.model import LevelRow, Side
+from collector.oracle import BookOracle
 
 # How often the book invariant (best bid < best ask) is checked. Both reads are
 # O(n) over a dict, so checking every frame would show up in the very numbers
@@ -63,6 +68,7 @@ class BookTransform:
 
         self._adapter = adapter
         self._book = Book()
+        self._oracle = BookOracle()
         self._buffered: list[Update] = []
         self._snapshot: Snapshot | None = None
         self._live = False
@@ -152,11 +158,19 @@ class BookTransform:
         self._adapter.advance(payload)
         if self._live:
             if not self._adapter.snapshot_supersedes():
+                # The snapshot this book did not need is the one the oracle
+                # wants: an independent read of a stream that never stopped.
+                # Where it *does* supersede there is nothing to compare, and
+                # the paragraph above is the reason — that read interrupted
+                # the diff stream, so a diff against it measures the
+                # interruption rather than the reconstruction.
+                self._compare(ctx)
                 return
             # Re-bootstrap from it. The buffer goes because it describes a
             # stream this snapshot has replaced, not one it continues.
             self._live = False
             self._buffered = []
+            self._oracle.reset()
         yield from self._try_bootstrap(ctx)
 
     def _on_frame(self, record: CaptureRecord, ctx: RunContext) -> Iterator[LevelRow]:
@@ -189,6 +203,7 @@ class BookTransform:
             ctx.logger.warning("gap detected", first_seq=event.first_seq)
             self._live = False
             self._buffered = [event]
+            self._oracle.reset()
             yield self._gap_row(event)
             return
 
@@ -213,6 +228,7 @@ class BookTransform:
         ctx.logger.warning("gap on the connection", symbol=self.symbol, seq=seq)
         self._live = False
         self._buffered = []
+        self._oracle.reset()
         yield self._gap_row_at(seq)
 
     def _try_bootstrap(self, ctx: RunContext) -> Iterator[LevelRow]:
@@ -239,6 +255,7 @@ class BookTransform:
 
         self.bootstraps += 1
         self._book.clear()
+        self._oracle.reset()
         self._adapter.bootstrapped(self._snapshot)
         ctx.logger.info(
             "bootstrapped",
@@ -253,9 +270,38 @@ class BookTransform:
         for event in applicable:
             yield from self._apply(event)
 
+    def _compare(self, ctx: RunContext) -> None:
+        """Hand the ignored snapshot to the oracle and export its verdict.
+
+        Yields nothing, which is the point: this changes no book state and
+        lands no row. It is a measurement taken beside the pipeline rather than
+        a step in it, and a run with the oracle removed would emit byte-identical
+        output.
+        """
+        assert self._snapshot is not None  # only reached with one in hand
+        broken = self._oracle.compare(self._snapshot, self._book)
+        registry = ctx.metrics.registry
+        result = "unaligned" if broken is None else "broken" if broken else "clean"
+        oracle_comparisons(registry).labels(
+            venue=self._adapter.venue, result=result
+        ).inc()
+        if not broken:
+            return
+        oracle_level_breaks(registry).labels(venue=self._adapter.venue).inc(broken)
+        ctx.logger.warning(
+            "book diverged from the venue's snapshot",
+            symbol=self.symbol,
+            snapshot_seq=self._snapshot.final_seq,
+            levels=broken,
+        )
+
     def _apply(self, event: Update) -> Iterator[LevelRow]:
         rows = self.level_rows(event)
         self._adapter.accept(event)
+        # Held for the next oracle comparison: a snapshot arrives describing a
+        # position the book has already passed, and these are what close the
+        # distance. See `collector.oracle` on why it rolls this way.
+        self._oracle.applied(event)
         self.rows += len(rows)
         if self.frames % _SANITY_EVERY == 0:
             bid, ask = self._book.best_bid_ask()
@@ -430,6 +476,7 @@ class BookTransform:
             "untrusted_frames": self.untrusted_frames,
             "live_at_exit": self._live,
             "crossed_books": self.crossed,
+            **self._oracle.summary(),
             "bid_levels": len(self._book.bids),
             "ask_levels": len(self._book.asks),
             "best_bid_ticks": bid,

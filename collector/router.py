@@ -164,6 +164,13 @@ class BookRouter:
                 "bootstraps",
                 "crossed_books",
                 "untrusted_frames",
+                # `oracle_comparisons` is the denominator the rest of them are
+                # only readable against, so it totals alongside them.
+                "oracle_comparisons",
+                "oracle_clean",
+                "oracle_unaligned",
+                "oracle_levels_compared",
+                "oracle_levels_broken",
             )
         }
         summary["symbols"] = len(self.books)
