@@ -786,3 +786,80 @@ Both were invisible for the same reason: a bounded run always ends.
 - **A service ran for `duration_s` and stopped.** The supervisor's deadline is
   `monotonic() + duration_s`, and the first service run exited immediately because the
   duration passed to it was zero. A service's deadline has to be one that never arrives.
+
+### The connection supervisor moves into the SDK
+
+The phase's fourth primitive, and the one that was deferred twice: `ShardSupervisor` had one
+consumer, and a primitive extracted from one consumer is a guess. What settled it is that
+the re-scope makes the SDK diff the deliverable — a supervisor that stays here is a
+supervisor the SDK never got.
+
+**The seam is "does it know what a venue is".** Everything that does not — N reader threads,
+staggered opens, per-connection backoff and failure counts, the bounded queue, the single
+drain, the transport-vs-data error split — is `ConnectionSupervisor`. Everything that does
+stays: the REST pacer (a venue's budget is per IP and the number comes from its published
+weights), the snapshot thread, the `seq` stamp (this capture format's arrival order, and what
+makes `FaultInjector` reproducible) and the repair latch on a drop.
+
+`FrameSource` needed **no change at all** to satisfy the new `Connection` protocol —
+`fetch(ctx, until=...)` and a `name` were already its shape — which is the evidence the seam
+was cut in the right place rather than negotiated into one. 337 lines became 132 here plus
+270 in the SDK, and `tests/test_supervisor.py` passes **unedited**: the no-shared-fate test,
+the full-queue drop, the busy-drain stop, the liveness reconnects and the loud fatal shard
+all still assert exactly what they asserted before.
+
+Three things the extraction changed on purpose:
+
+- **A supervisor with no duration is the default**, rather than a caller's obligation to pass
+  `math.inf`. The Phase 4 bug where a service ran for `duration_s` and stopped was a missing
+  argument at a call site; it is now the shape of the type.
+- **`fetch` is typed as a generator**, so the wrapper can `close()` it and have the reader
+  threads stopped and joined where it chooses instead of when the object is collected.
+- **The shard-to-symbol map is logged at start.** `failures_per_shard=[0,1,0]` and a fatal
+  shard's index were unreadable without it — the old code put the symbols in the fatal log
+  line and nowhere else, so the common case (a per-shard count) had nothing to key on.
+
+Two out-of-band paths kept the extraction honest. Snapshot records fetched off the reader
+threads go through the supervisor's public `offer` rather than a queue of their own, because
+a second queue is a second drop policy and a second counter. And the drop callback takes the
+record, not the connection: the snapshot thread enqueues on behalf of the shard that owns the
+symbol, not on its own behalf, so a connection-shaped callback would have latched the repair
+on the wrong book.
+
+### The drop policy stops being a claim
+
+`queue_depth` and `messages_dropped_total{reason}` are new standard series, and §8 freezes
+that surface, so the widening is deliberate — recorded in `ARCHITECTURE.md` and the SDK
+changelog. Until now `ShardSupervisor.dropped` was an int in a log line at the end of a run:
+the guardrail every one of these documents leads with was, in production, unobservable.
+
+They carry no `queue` label. The TODO said `queue="ring"|"batch"`; `BatchingSink` turns out
+to accumulate on the calling thread and flush inline, so it has an occupancy but no producer
+that can outrun it and no way to drop. See `NOTES.md` § *The queue metrics carry no `queue`
+label*.
+
+Depth is sampled on the drain's `_DRAIN_SLICE_SECONDS` tick rather than set per record —
+nothing reads it faster than the metrics push, and the drain is the hot path. Drops are
+counted per event, because a drop is rare by construction and an uncounted one is the exact
+failure the series exists to catch.
+
+### Verification
+
+Four Kraken symbols at depth 100, into the local ClickHouse node, as a service:
+
+- **190s live run: 85,506 records, 0 drops, 0 reconnects, 0 fatal shards, 0 rotations.**
+  4 books live at exit, 0 gaps, 0 crossed books, 0 unrouted.
+- **126,982 rows in ClickHouse, and `BookRouter` counted 126,982** — the partial batch at
+  drain was written exactly once, still true with the queue on the other side of the SDK
+  boundary.
+- `/healthz` 200 from the first moment; `/readyz` 503 until records flowed, then 200.
+  SIGTERM drained rather than truncated.
+- `queue_depth` populated from a live drain (6 at the sample), `messages_dropped_total` 0.
+
+And the drop path, forced rather than waited for — a queue of one against a ~580 msg/s feed,
+with a consumer sleeping 2ms a record:
+
+- **1,889 drops, all counted on `messages_dropped_total{reason="queue_full"}`**, against 799
+  records landed. The run kept producing rather than stalling, which is the guardrail.
+- 696 resubscribes over 14 seconds: every drop latched its symbol for a repair snapshot, and
+  the existing recovery machinery acted on every one of them.

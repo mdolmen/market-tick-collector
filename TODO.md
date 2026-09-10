@@ -88,10 +88,10 @@ is a legal `Source` and `WorkerApp` ran it untouched, so Phase 0 needed **zero**
 - [x] `RunContext` carries a metrics handle, and the registry a consumer can add its own to
 - [x] Clock-difference histogram labelled by venue, deferred from Phase 2
 - [x] `price_ticks` needs 128 bits; `Int64` cannot hold a tick at `SCALE = 8`
-- [ ] Connection supervisor primitive: N connections, per-connection health, no shared fate
-- [ ] New series `messages_dropped_total`, `queue_depth`, drop reason — a deliberate §8 change
-- [ ] Label them `queue="ring"|"batch"`; `stage` is already taken by the SDK and frozen
-- [ ] Drop the bounded-queue and checkpoint items from `data-pipeline-core`'s TODO too
+- [x] Connection supervisor primitive: N connections, per-connection health, no shared fate
+- [x] New series `messages_dropped_total`, `queue_depth`, drop reason — a deliberate §8 change
+- [x] ~~Label them `queue="ring"|"batch"`~~ — decided against; see `NOTES.md`
+- [x] Drop the bounded-queue and checkpoint items from `data-pipeline-core`'s TODO too
 
 ## Phase 5 · Backpressure — cut
 

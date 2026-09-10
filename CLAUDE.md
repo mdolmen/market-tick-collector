@@ -78,6 +78,10 @@ exists.
   wrong prediction is part of the record, not something to quietly correct.
 - **Decisions live in `NOTES.md`.** When something moves from OPEN to DECIDED,
   record it there with the reasoning, then reflect the work in `TODO.md`.
+- **Ticking a `TODO.md` box does not rewrite it.** Tick it and leave the line
+  alone. The reasoning goes in `NOTES.md` and the measurements in
+  `DEVELOPMENT.md`; a plan that grows an explanation every time something ships
+  stops being scannable, which is the only thing it is for.
 
 ## Conventions
 
