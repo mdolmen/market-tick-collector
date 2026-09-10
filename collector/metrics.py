@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from weakref import WeakKeyDictionary
 
-from prometheus_client import CollectorRegistry, Histogram
+from prometheus_client import CollectorRegistry, Counter, Histogram
 
 # Seconds. The quantity is one-way delay plus clock offset, which on a public
 # venue over the internet lands in single-digit to low-hundreds of
@@ -52,3 +52,56 @@ def clock_difference(registry: CollectorRegistry) -> Histogram:
         )
         _HISTOGRAMS[registry] = histogram
     return histogram
+
+
+# The same first-use registration, for the series that are counters. Keyed by
+# metric name within a registry so one dictionary serves all of them.
+_COUNTERS: WeakKeyDictionary[CollectorRegistry, dict[str, Counter]] = (
+    WeakKeyDictionary()
+)
+
+
+def _counter(
+    registry: CollectorRegistry,
+    name: str,
+    documentation: str,
+    labels: tuple[str, ...],
+) -> Counter:
+    counters = _COUNTERS.setdefault(registry, {})
+    counter = counters.get(name)
+    if counter is None:
+        counter = Counter(name, documentation, list(labels), registry=registry)
+        counters[name] = counter
+    return counter
+
+
+def oracle_comparisons(registry: CollectorRegistry) -> Counter:
+    """Periodic snapshots diffed against the reconstructed book, by outcome.
+
+    One series rather than three because the denominator and the outcomes have
+    to be read together: `NOTES.md` § *Validating against the venue's own
+    top-N* asks for a break count *with a denominator*, and a bare break count
+    is the shape it rejects. `unaligned` is coverage lost rather than a book
+    found wrong — see `collector.oracle` — and stays a third value here so it
+    can never be mistaken for either.
+    """
+    return _counter(
+        registry,
+        "book_oracle_comparisons_total",
+        "Reconstructed book against the venue's own snapshot, by outcome.",
+        ("venue", "result"),
+    )
+
+
+def oracle_level_breaks(registry: CollectorRegistry) -> Counter:
+    """Diverging price levels, which is the magnitude of the count above.
+
+    Separate because one snapshot disagreeing by a single level and one
+    disagreeing by a thousand are the same event and very different news.
+    """
+    return _counter(
+        registry,
+        "book_oracle_level_breaks_total",
+        "Price levels where the reconstructed book and the snapshot disagree.",
+        ("venue",),
+    )
