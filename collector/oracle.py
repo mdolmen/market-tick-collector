@@ -32,11 +32,14 @@ because sizes are absolute set-to-value, the same property that lets the
 bootstrap apply a straddling frame. Where the roll-forward cannot be done the
 comparison is skipped and counted; a skipped comparison is never a break.
 
-**Judge only the depth the snapshot covers.** A REST depth response is the top
+**Judge only the depth both sides cover.** A REST depth response is the top
 ``snapshot_limit`` levels a side, while the diff stream is full-depth, so the
-book legitimately holds levels the snapshot never described. Comparison is
-confined to the price span the snapshot asserts, and the claim it backs is
-therefore divergence *within that depth*, which is what the summary says.
+book legitimately holds levels the snapshot never described — and the *book*
+was bootstrapped from a truncated response too, so it is missing levels the
+snapshot describes and it was never given. Comparison is confined to where
+both are authoritative, and the claim it backs is therefore divergence *within
+that depth*, which is what the summary says. `bootstrapped` carries the second
+half of that, and the measurement that found it.
 
 The work is one pass over the snapshot's levels and one over the book's, once
 per snapshot interval — 10⁴ dict operations every 300 seconds, against a frame
