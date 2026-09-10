@@ -107,11 +107,26 @@ def synthetic_snapshot(before_index: int) -> dict[str, Any]:
 
     ``lastUpdateId`` sits one below that frame's ``U``, so the frame straddles
     it and the splice starts exactly there.
+
+    **The levels are the book those frames actually built.** They are replayed
+    from ``synthetic_frame`` onto the opening state rather than invented, which
+    keeps every snapshot after the first agreeing with the stream it is spliced
+    into. A builder that emitted one fixed level a side produces a capture no
+    live session could ever land, and `tests/test_oracle.py` — which exists to
+    diff a snapshot against the reconstruction — would read the fixture's own
+    disagreement as book drift.
     """
+    bids = {f"{_BID_TICKS / 10**8:.8f}": "1.00000000"}
+    asks = {f"{(_BID_TICKS + _TICK * 10) / 10**8:.8f}": "2.00000000"}
+    for index in range(before_index):
+        frame = synthetic_frame(index)
+        for levels, key in ((bids, "b"), (asks, "a")):
+            for price, size in frame[key]:
+                levels[price] = size
     return {
         "lastUpdateId": _BASE_ID + before_index * _IDS_PER_FRAME - 1,
-        "bids": [[f"{_BID_TICKS / 10**8:.8f}", "1.00000000"]],
-        "asks": [[f"{(_BID_TICKS + _TICK * 10) / 10**8:.8f}", "2.00000000"]],
+        "bids": [[price, size] for price, size in bids.items()],
+        "asks": [[price, size] for price, size in asks.items()],
     }
 
 
