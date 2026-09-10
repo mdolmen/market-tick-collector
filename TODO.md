@@ -116,7 +116,7 @@ is a legal `Source` and `WorkerApp` ran it untouched, so Phase 0 needed **zero**
       already lands the snapshots it reads
 - [x] Compare only where the book is `live`; an untrusted book measures where it stopped
 - [x] Report its break count, and the Kraken CRC32 break count, as two numbers
-- [ ] Run it against a live session and commit the divergence rate
+- [x] Run it against a live session and commit the divergence rate
 
 ## Phase 7 · Storage
 
