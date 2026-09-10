@@ -111,10 +111,12 @@ is a legal `Source` and `WorkerApp` ran it untouched, so Phase 0 needed **zero**
 - [x] Emit `snapshot` and `gap` as control records so replay reproduces the transitions
 - [x] Cold rebuild on restart — no durable book state, the venue is the source of truth
 - [x] Exercise recovery with the fault injector; assert convergence after re-snapshot
-- [ ] Oracle: reconstructed book vs venue REST snapshot, periodic, all three venues.
-      `snapshot_interval_s` already lands the snapshots it reads
-- [ ] Compare only where the book is `live`; an untrusted book measures where it stopped
-- [ ] Report its break count, and the Kraken CRC32 break count, as two numbers
+- [x] Oracle: reconstructed book vs venue REST snapshot, periodic, Binance only —
+      the other two have no id-alignable independent read. `snapshot_interval_s`
+      already lands the snapshots it reads
+- [x] Compare only where the book is `live`; an untrusted book measures where it stopped
+- [x] Report its break count, and the Kraken CRC32 break count, as two numbers
+- [ ] Run it against a live session and commit the divergence rate
 
 ## Phase 7 · Storage
 
