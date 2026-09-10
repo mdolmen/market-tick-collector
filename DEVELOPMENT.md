@@ -865,3 +865,46 @@ with a consumer sleeping 2ms a record:
   records landed. The run kept producing rather than stalling, which is the guardrail.
 - 696 resubscribes over 14 seconds: every drop latched its symbol for a repair snapshot, and
   the existing recovery machinery acted on every one of them.
+
+---
+
+## Phase 6 — the oracle
+
+`collector/oracle.py`: the reconstructed book diffed against Binance's own periodic REST
+snapshot, id-aligned. The reasoning for building it, and for building it on one venue rather
+than three, is `NOTES.md` § *The REST oracle* and § *Why Coinbase has no oracle*.
+
+### The prediction
+
+Written before the first live run, and left alone afterwards whichever way it goes.
+
+The reconstruction is exact arithmetic. Sizes are absolute set-to-value, the sequence is
+checked frame by frame, and a break in it takes the book untrusted before anything else
+happens — so on a session with no gaps there is no mechanism by which an applied frame can
+leave the book wrong. The prediction is therefore not "small divergence" but **zero**:
+
+- **Every comparison clean, on a run with no gaps.** Not most of them. A single broken level
+  on a clean session means the diff application is wrong, and that is the finding.
+- `unaligned` in the low single digits at most, and zero if the ring is generously sized —
+  it exists for a snapshot fetch slow enough to outrun 4096 retained frames, which at a
+  100ms channel is roughly seven minutes of them.
+
+The way this prediction fails that would *not* mean the book is wrong, and the thing to look
+for first if it does:
+
+- **The bootstrap truncation floor.** The book is seeded from a `limit=5000` snapshot, so it
+  begins knowing nothing below that snapshot's worst bid. The diff stream teaches it about a
+  deeper level only when that level *changes*; one that sat there untouched at bootstrap is
+  absent from the book permanently. If the market later widens and a subsequent snapshot's
+  band floor drops below the bootstrap floor, that gap between the two is a region the book
+  was never authoritative over, and every untouched level in it reads as a break.
+- The signature is unmistakable and is what to check: breaks **one-sided** (the snapshot has
+  a level, the book does not), **concentrated at the deep end** of the band, and **growing
+  with run length**. Breaks near the mid, or two-sided ones, are the book being wrong.
+- If that is what shows up, the fix is a comparison change and not a book change: floor the
+  band at the bootstrap snapshot's own worst price as well as at the current one, so the
+  oracle judges only the depth the book was ever given.
+
+Predicting zero is a deliberate choice of a falsifiable number over a safe one. A prediction
+of "under 0.1%" would be unfalsifiable by this run and would have quietly excused exactly the
+bug the oracle exists to catch.
