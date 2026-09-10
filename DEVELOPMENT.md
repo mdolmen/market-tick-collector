@@ -803,8 +803,10 @@ makes `FaultInjector` reproducible) and the repair latch on a drop.
 
 `FrameSource` needed **no change at all** to satisfy the new `Connection` protocol —
 `fetch(ctx, until=...)` and a `name` were already its shape — which is the evidence the seam
-was cut in the right place rather than negotiated into one. 337 lines became 132 here plus
-270 in the SDK, and `tests/test_supervisor.py` passes **unedited**: the no-shared-fate test,
+was cut in the right place rather than negotiated into one. `collector/supervisor.py` traded
+200 lines for 132 — the threads, the queue, the reconnect loop and the drain out; a pacer, a
+snapshot thread and a repair latch in — and `tests/test_supervisor.py` passes **unedited**:
+the no-shared-fate test,
 the full-queue drop, the busy-drain stop, the liveness reconnects and the loud fatal shard
 all still assert exactly what they asserted before.
 
