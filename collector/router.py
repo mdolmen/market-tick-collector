@@ -164,8 +164,11 @@ class BookRouter:
                 "bootstraps",
                 "crossed_books",
                 "untrusted_frames",
-                # `oracle_comparisons` is the denominator the rest of them are
-                # only readable against, so it totals alongside them.
+                # The two reconciliation numbers, summed but never merged:
+                # they bound different things, and `collector.metrics` says
+                # which. `oracle_comparisons` is the denominator the other
+                # oracle fields are only readable against, so it totals too.
+                "checksum_breaks",
                 "oracle_comparisons",
                 "oracle_clean",
                 "oracle_unaligned",

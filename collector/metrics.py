@@ -105,3 +105,22 @@ def oracle_level_breaks(registry: CollectorRegistry) -> Counter:
         "Price levels where the reconstructed book and the snapshot disagree.",
         ("venue",),
     )
+
+
+def checksum_breaks(registry: CollectorRegistry) -> Counter:
+    """Frames whose venue-published integrity token disagreed with our view.
+
+    **Never merged with the oracle's count**, which is `TODO.md` § *Phase 6*
+    asking for two numbers: they bound different things. The checksum is
+    continuous, venue-native and covers the top ten; the oracle is periodic,
+    independent and covers the depth a REST read returns. Adding them would
+    produce a number that bounds neither.
+
+    Zero on a venue that publishes no token, which is most of them.
+    """
+    return _counter(
+        registry,
+        "venue_checksum_breaks_total",
+        "Frames whose venue-published integrity token disagreed with our view.",
+        ("venue",),
+    )

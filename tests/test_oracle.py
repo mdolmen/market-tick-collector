@@ -22,11 +22,13 @@ from data_pipeline_core.ingestion.http import HttpClient
 
 from collector.adapters.binance import BinanceAdapter
 from collector.adapters.coinbase import CoinbaseAdapter
+from collector.adapters.kraken import KrakenAdapter
 from collector.capture import CaptureRecord
 from collector.transform import BookTransform
 from tests.conftest import (
     capture,
     coinbase_capture,
+    kraken_capture,
     synthetic_capture,
     synthetic_frame,
     synthetic_snapshot,
@@ -106,6 +108,7 @@ def test_drift_with_no_gap_is_a_break() -> None:
 
     summary = transform.summary()
     assert summary["gaps"] == 0
+    assert summary["checksum_breaks"] == 0
     assert summary["crossed_books"] == 0
     assert summary["oracle_comparisons"] == 2
     assert summary["oracle_levels_broken"] == 1
@@ -213,3 +216,41 @@ def test_a_superseding_snapshot_is_never_compared() -> None:
     assert summary["bootstraps"] == 2, "the snapshots did arrive and did supersede"
     assert summary["oracle_comparisons"] == 0
     assert summary["oracle_unaligned"] == 0
+
+
+# --- the second number ------------------------------------------------------
+
+
+def test_a_checksum_break_is_counted_apart_from_a_gap() -> None:
+    """Two numbers, because they are two claims — `TODO.md` § *Phase 6*.
+
+    The break reaches the book through `gap_detected`, so before this counter
+    existed a Kraken run reported it as a gap and nothing distinguished "the
+    venue says our top ten is wrong" from "the sequence lost a message". On
+    this venue every gap is the former, which is exactly why the number cannot
+    be recovered from `gaps` after the fact.
+    """
+    records = kraken_capture(count=40, snapshot_every=20)
+    frames = [record for record in records if record["kind"] == "frame"]
+    dropped = frames[len(frames) // 2]
+    without_it = [record for record in records if record["seq"] != dropped["seq"]]
+
+    def book() -> BookTransform:
+        return BookTransform(symbol="BTC/USD", adapter=KrakenAdapter(depth=1000))
+
+    intact = run(records, book()).summary()
+    broken = run(without_it, book()).summary()
+
+    assert intact["checksum_breaks"] == 0, "the builder's own session is consistent"
+    # Reported once, at the edge: the adapter stops maintaining its view while
+    # the book is untrusted, so this is a count of breaks and not of frames.
+    assert broken["checksum_breaks"] == 1
+    assert broken["gaps"] == 1
+
+
+def test_a_venue_without_an_integrity_token_never_reports_one() -> None:
+    """The counter is venue-neutral, so it has to stay zero where there is none."""
+    assert (
+        run(synthetic_capture(count=40, snapshot_every=20)).summary()["checksum_breaks"]
+        == 0
+    )

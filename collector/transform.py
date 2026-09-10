@@ -47,6 +47,7 @@ from collector.adapters.base import (
 from collector.book import Book
 from collector.capture import CaptureRecord, payload_of
 from collector.metrics import (
+    checksum_breaks,
     clock_difference,
     oracle_comparisons,
     oracle_level_breaks,
@@ -78,6 +79,9 @@ class BookTransform:
         self.gaps = 0
         self.bootstraps = 0
         self.crossed = 0
+        # Frames the venue's own integrity token rejected, kept apart from
+        # `gaps` — see `transform`. Zero on a venue that publishes no token.
+        self.checksum_breaks = 0
         # Frames that arrived while the book was untrusted — buffered, not
         # applied. The untrusted *interval* is what convergence is measured
         # over (``NOTES.md`` § *The state machine is the artifact*), and a
@@ -108,7 +112,18 @@ class BookTransform:
         # it is checked, and on a venue with no sequence it is the only thing
         # that can tell the book it has gone wrong — so it must run whether the
         # book is live, buffering or already untrusted.
-        self._adapter.observe(payload_of(record))
+        consistent = self._adapter.observe(payload_of(record))
+        if record["kind"] == "frame" and self._live and not consistent:
+            # Counted here and nowhere else. The break reaches the book through
+            # `gap_detected`, which lands it in `gaps` alongside sequence
+            # breaks — and the two are different evidence about different
+            # things, so `TODO.md` § *Phase 6* asks for them as two numbers.
+            # Read before the frame is handled, because handling it is what
+            # ends the live interval this break was found in.
+            self.checksum_breaks += 1
+            checksum_breaks(ctx.metrics.registry).labels(
+                venue=self._adapter.venue
+            ).inc()
         if record["kind"] == "snapshot":
             yield from self._on_snapshot(record, ctx)
         else:
@@ -476,6 +491,7 @@ class BookTransform:
             "untrusted_frames": self.untrusted_frames,
             "live_at_exit": self._live,
             "crossed_books": self.crossed,
+            "checksum_breaks": self.checksum_breaks,
             **self._oracle.summary(),
             "bid_levels": len(self._book.bids),
             "ask_levels": len(self._book.asks),
