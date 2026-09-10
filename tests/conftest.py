@@ -130,6 +130,23 @@ def synthetic_snapshot(before_index: int) -> dict[str, Any]:
     }
 
 
+def deepened_snapshot(before_index: int) -> dict[str, Any]:
+    """``synthetic_snapshot``, plus one level a side beyond the opening depth.
+
+    A venue's REST response is the top N, so its outermost price wanders as the
+    market moves. This is that: a later snapshot reaching past what the book
+    was bootstrapped with, on both sides. The book cannot know those levels —
+    a diff teaches it one only if that level changes — so they are the shape
+    `collector.oracle` refuses to hold it to.
+    """
+    snapshot = synthetic_snapshot(before_index)
+    deeper_bid = _BID_TICKS - _TICK
+    deeper_ask = _BID_TICKS + _TICK * 11
+    snapshot["bids"].append([f"{deeper_bid / 10**8:.8f}", "4.00000000"])
+    snapshot["asks"].append([f"{deeper_ask / 10**8:.8f}", "5.00000000"])
+    return snapshot
+
+
 def synthetic_capture(*, count: int, snapshot_every: int = 0) -> list[CaptureRecord]:
     """``count`` chained frames, with a snapshot at 0 and every ``n`` after."""
     positions = {0}

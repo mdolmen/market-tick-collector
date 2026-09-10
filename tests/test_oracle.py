@@ -28,6 +28,7 @@ from collector.transform import BookTransform
 from tests.conftest import (
     capture,
     coinbase_capture,
+    deepened_snapshot,
     kraken_capture,
     synthetic_capture,
     synthetic_frame,
@@ -144,6 +145,42 @@ def test_a_level_outside_the_snapshots_depth_is_not_a_break() -> None:
     assert planted(below=True)["oracle_levels_broken"] == 0
     assert planted(below=True)["oracle_clean"] == 2
     assert planted(below=False)["oracle_levels_broken"] == 2
+
+
+def test_a_snapshot_deeper_than_the_bootstrap_is_not_a_break() -> None:
+    """The regression for what the first live run actually found.
+
+    Phase 6 predicted zero breaks and measured 173 in 40,001 levels — every one
+    of them one-sided, every one in the deepest 1.5% of the band, on a session
+    with no gaps. The book was not wrong. It was bootstrapped from a truncated
+    response and can never know a level below that cut which nothing has
+    changed since, so a later snapshot reaching deeper asks it about levels it
+    was never given. See `DEVELOPMENT.md` § *Grading the prediction*.
+
+    Asserted as *no change at all* rather than as no breaks: extending a
+    snapshot past what the book was bootstrapped with must move neither the
+    numerator nor the denominator, or the comparison is still reading a
+    truncation boundary as evidence.
+    """
+    frames = [json.dumps(synthetic_frame(index)) for index in range(30)]
+    shallow = run(
+        capture(
+            snapshots={0: synthetic_snapshot(0), 20: synthetic_snapshot(20)},
+            frames=frames,
+        )
+    ).summary()
+    deepened = run(
+        capture(
+            snapshots={0: synthetic_snapshot(0), 20: deepened_snapshot(20)},
+            frames=frames,
+        )
+    ).summary()
+
+    assert shallow["oracle_comparisons"] == 1
+    assert shallow["oracle_levels_broken"] == 0
+    assert cast(int, shallow["oracle_levels_compared"]) > 0
+    assert deepened["oracle_levels_compared"] == shallow["oracle_levels_compared"]
+    assert deepened["oracle_levels_broken"] == 0
 
 
 # --- refusing to compare ----------------------------------------------------

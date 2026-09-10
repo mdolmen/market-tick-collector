@@ -270,7 +270,9 @@ class BookTransform:
 
         self.bootstraps += 1
         self._book.clear()
-        self._oracle.reset()
+        # The snapshot the book is about to be built from is also the extent of
+        # what it will know: `BookOracle.bootstrapped` is where that matters.
+        self._oracle.bootstrapped(self._snapshot)
         self._adapter.bootstrapped(self._snapshot)
         ctx.logger.info(
             "bootstrapped",

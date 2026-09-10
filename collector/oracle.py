@@ -85,6 +85,11 @@ class BookOracle:
         # needs every frame the book applied after the snapshot's position, so
         # this is what says whether one of them is already gone.
         self._evicted: int | None = None
+        # The depth the book was bootstrapped with, which bounds what it can be
+        # held to. See `bootstrapped`. `None` until the first one arrives, and
+        # nothing is compared before that.
+        self._floor: int | None = None
+        self._ceiling: int | None = None
 
         # Snapshots actually diffed — the denominator, and the reason `clean`
         # is reportable as a rate rather than as a bare count.
@@ -115,6 +120,34 @@ class BookOracle:
         self._recent.clear()
         self._evicted = None
 
+    def bootstrapped(self, snapshot: Snapshot) -> None:
+        """The book was just built from this, which is the extent of its knowledge.
+
+        **Measured, not assumed** — Phase 6's first live run predicted zero
+        breaks and found 173 in 40,001 levels, every one of them one-sided and
+        ranked in the deepest 1.5% of the band. See `DEVELOPMENT.md` § *Grading
+        the prediction*.
+
+        The cause is here rather than in the book. A bootstrap seeds from a
+        `limit`-truncated response, so the book begins knowing nothing beyond
+        that snapshot's worst price a side. The diff stream teaches it a deeper
+        level only when that level *changes*; one sitting untouched below the
+        cut is absent from the book for as long as it stays untouched. When the
+        market later moves, a fresh snapshot's band reaches into that region
+        and every untouched level in it reads as a break the collector never
+        committed.
+
+        So authority is bounded on both ends, and the comparison uses whichever
+        of the two bounds is the narrower. It does not widen as the run goes on:
+        a diff at a deep price says what *that* level is now, and nothing about
+        its neighbours.
+        """
+        self.reset()
+        bids = _levels(snapshot.bids)
+        asks = _levels(snapshot.asks)
+        self._floor = min(bids) if bids else None
+        self._ceiling = max(asks) if asks else None
+
     # --- the comparison -----------------------------------------------------
 
     def compare(self, snapshot: Snapshot, book: Book) -> int | None:
@@ -132,8 +165,13 @@ class BookOracle:
         # Before the roll-forward: the band is the depth the *venue* answered
         # with, and a frame that deletes the outermost level does not shrink
         # what the snapshot was authoritative about.
-        floor = min(bids) if bids else None
-        ceiling = max(asks) if asks else None
+        #
+        # Narrowed to what the book was ever given, which is the other half of
+        # the same truncation — `bootstrapped` is where that is argued. The
+        # narrower of the two bounds wins on each side, so the comparison only
+        # ever covers depth both of them cover.
+        floor = _bid_floor(min(bids) if bids else None, self._floor)
+        ceiling = _ask_ceiling(max(asks) if asks else None, self._ceiling)
 
         for event in self._recent:
             if event.final_seq <= snapshot.final_seq:
@@ -205,3 +243,17 @@ def _at_or_above(price: int, edge: int) -> bool:
 
 def _at_or_below(price: int, edge: int) -> bool:
     return price <= edge
+
+
+def _bid_floor(snapshot: int | None, book: int | None) -> int | None:
+    """The shallower of two bid floors — a higher price bounds a narrower band.
+
+    ``None`` where either side asserts nothing, which is not the same as an
+    empty intersection: it means there is no evidence rather than no agreement.
+    """
+    return None if snapshot is None or book is None else max(snapshot, book)
+
+
+def _ask_ceiling(snapshot: int | None, book: int | None) -> int | None:
+    """The shallower of two ask ceilings — a lower price bounds a narrower band."""
+    return None if snapshot is None or book is None else min(snapshot, book)
