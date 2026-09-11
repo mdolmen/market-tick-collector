@@ -60,7 +60,7 @@ from data_pipeline_core import (
     ServiceApp,
     Sink,
     WorkerApp,
-    batching_sink,
+    arrow_batching_sink,
     dlt_sink,
     raw_landing_sink,
 )
@@ -68,7 +68,7 @@ from data_pipeline_core.runtime.logging import get_logger
 
 from collector import adapters
 from collector.capture import CaptureRecord
-from collector.model import LevelRow
+from collector.model import ARROW_SCHEMA, LevelRow
 from collector.rates import RATES
 from collector.replay import FaultConfig, ReplaySource
 from collector.router import BookRouter
@@ -166,9 +166,15 @@ def _row_sink(settings: CollectorSettings) -> Sink[LevelRow]:
     if settings.output == "clickhouse":
         # The flush triggers are SDK settings with defaults measured in
         # `bench/clickhouse.py`; the sink itself only knows how to write a
-        # batch it is handed.
-        return batching_sink(
-            ClickHouseSink(settings.clickhouse_dsn, settings.clickhouse_table),
+        # batch it is handed. The schema is this project's and is pinned, so
+        # every batch is the same shape whatever the rows happened to contain.
+        return arrow_batching_sink(
+            ClickHouseSink(
+                settings.clickhouse_dsn,
+                settings.clickhouse_table,
+                dedup_window=settings.clickhouse_dedup_window,
+            ),
+            schema=ARROW_SCHEMA,
             max_rows=settings.batch_max_rows,
             max_seconds=settings.batch_max_seconds,
         )

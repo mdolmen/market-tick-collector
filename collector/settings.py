@@ -112,6 +112,14 @@ class CollectorSettings(Settings):
     clickhouse_dsn: str = "http://mtc:mtc@localhost:8123/mtc"
     clickhouse_table: str = "levels"
 
+    # How many recent insert blocks the server remembers per partition, which
+    # is what makes a replayed batch a no-op. It has to exceed the batches one
+    # partition's replay produces, or the early tokens are evicted before the
+    # replay reaches them and the tail duplicates. A day is one partition and
+    # ~10⁹ rows (`bench/volume.py`), so at the 50k row trigger that is ~20,000
+    # batches; 30,000 clears it with headroom, at a few dozen bytes a block.
+    clickhouse_dedup_window: int = 30_000
+
     # Which wiring of the same two pieces to run:
     #   collect  socket -> book -> level rows -> curated sink (the Phase 0 path)
     #   capture  socket -> raw landing, verbatim, no book at all
