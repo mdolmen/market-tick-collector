@@ -153,7 +153,7 @@ is a legal `Source` and `WorkerApp` ran it untouched, so Phase 0 needed **zero**
 
 ## Docs
 
-- [ ] README leading with numbers
-- [ ] Architecture diagram
-- [ ] The normalization boundary, and the one place it leaks
-- [ ] The SDK diff: what `ServiceApp` forced, and which abstractions survived intact
+- [x] README leading with numbers
+- [x] Architecture diagram
+- [x] The normalization boundary, and the one place it leaks
+- [x] The SDK diff: what `ServiceApp` forced, and which abstractions survived intact
