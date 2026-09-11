@@ -986,3 +986,76 @@ independent read (`NOTES.md` § *Why Coinbase has no oracle*); about Kraken, who
 its own oracle and reported 0 breaks over the Phase 2.5 sessions; about depth beyond the top
 5000; or about a run long enough to see a gap — this one had none, so the oracle has not yet
 been exercised against a book that recovered.
+
+---
+
+## Phase 7 — storage
+
+The Arrow batch sink, and the four numbers `NOTES.md` § *Phase 9 — cut entirely* moved here
+when the benchmark phase was struck: receive-to-disk percentiles, sustained throughput and
+burst at shard scale, the live/replay split, and the grade on Phase 0's architecture
+prediction. Phase 7 is the critical path because every one of them needs a sink that writes
+continuously, and until now the curated path wrote rows one list at a time.
+
+### The prediction
+
+Written **before** any of the runs below, and before `bench/storage.py` was run once. What
+was already known when this was written, so the prediction is not quietly retrodicted: the
+Phase 4 spike measured ClickHouse's Arrow insert path at ≥881k rows/s at every batch size
+from 10k to 1M, against a measured multi-venue arrival of ~12,000 rows/s. Nothing had been
+measured about the row-oriented path, about latency, or about the sink's cost inside the
+replay loop.
+
+**1. The Arrow insert beats the row-oriented insert by 2–5×, and it will not matter.**
+`clickhouse_connect`'s row path transposes a list of lists into columns in Python and
+serialises per value; the Arrow path hands over a buffer the server can read more directly.
+So the ratio should be large. It is also irrelevant to the running system, because both
+numbers are two orders of magnitude above the ~12,000 rows/s arriving — which is the same
+finding Phase 4 already made about flush triggers, arriving a second time. **The interesting
+way to be wrong is a ratio near 1×**, which would mean the contract change bought nothing
+measurable and rests on the record-representation argument alone. That is a result worth
+publishing either way, and the reason this is measured rather than asserted.
+
+**2. Receive-to-disk p50 lands near half the flush interval; p99 near the whole of it.**
+The batch closes on age long before it closes on size — at ~12,000 rows/s the 50,000-row
+trigger needs ~4s and the time trigger fires at 2.0s — so a row's time on disk is dominated
+by how long its batch stayed open, and arrival within an open batch is roughly uniform. That
+predicts **p50 ≈ 1.0s, p90 ≈ 1.8s, p99 ≈ 2.0s**, with the insert itself (single-digit ms at
+these batch sizes) invisible underneath. If p99 lands materially *above* 2.0s, the extra is
+the insert plus the drain and is the only part of this number this code controls.
+
+This is the Phase 0 deferral finally paid: a bounded run's single end-of-run `sink.write()`
+made the quantity describe the run's shape rather than the pipeline's.
+
+**3. The replay ceiling drops by less than 20% with the sink in the loop.** `bench/replay.py`
+measures decode → book → `LevelRow` with the sink excluded. Adding the sink adds
+`from_pylist` over the batch plus an insert the server absorbs at ≥881k rows/s. The book
+apply is the expensive part and it is unchanged, so the sink should be a minority cost.
+**Wrong in the interesting direction would be `from_pylist` dominating** — it walks every row
+in Python, and if the batch conversion costs more than the book work then the columnar sink
+made the pipeline slower, and `arrow_batching_sink`'s docstring note about a column-wise
+builder stops being hypothetical.
+
+**4. Phase 0's three architecture bullets grade unevenly, and two cannot be graded at all.**
+Stated now rather than discovered later:
+
+- *The `dict` book holds up on writes; `best_bid_ask` breaks first.* The write half is
+  gradeable from the replay ceiling. The read half is not — the read benchmark was cut in the
+  September re-scope (`NOTES.md` § *Phase 6*), which is a cost that phase accepted.
+- *Reader thread + ring buffer beats pure asyncio by less than 2×.* **Ungradeable, and the
+  reason is that no asyncio implementation was ever built.** There is nothing to compare
+  against and there never was. Recording that is better than dropping the bullet.
+- *`Record = dict[str, Any]` becomes the dominant per-row cost around 10⁵ rows/s.* Gradeable
+  against the replay ceiling only; live arrival is ~12,000 rows/s, an order of magnitude
+  below the crossover, so no live run can reach it. **And the Arrow sink does not test this
+  either** — it moved the *destination* off dicts, not the pipeline. The transform still
+  yields a `dict` per row and `from_pylist` still walks them. Phase 7 grades the insert path;
+  the record representation stays unmeasured, and a phase that implied otherwise would be
+  claiming the stronger result for the weaker work.
+
+**5. Idempotency holds for a replay and not for a live restart, by construction.** The dedup
+token is derived from a batch's own contents, so identical rows must re-batch identically for
+the server to recognise them. A replay at a fixed row trigger does; a process that died with
+a partial batch buffered resumes on a different boundary and duplicates. Both halves are
+asserted in `tests/test_clickhouse.py` rather than left as a caveat in prose, because a
+stated limit nobody tested is a hope.
