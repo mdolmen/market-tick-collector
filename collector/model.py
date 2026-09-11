@@ -115,12 +115,18 @@ ARROW_SCHEMA = pa.schema(
 # `price_ticks` and `size_lots` are decimals here for the reason `TICKS` gives
 # above, and it bites harder on this tier: dlt's `bigint` is a 64-bit Parquet
 # column, so Kraken's 8.9e19 tick would overflow it. Python's int reaching a
-# fixed-width type is the same discovery in a second place.
-# A fresh dict per column, never a shared one: dlt writes the column's own
-# `name` into the hint it is given, so two columns sharing a dict end up
-# claiming the same name and dlt merges them into one. It says so in a warning
-# and then lands a table quietly missing columns.
+# fixed-width type is the same discovery in a second place. Declaring the
+# column is not the whole fix — see `collector.sinks.WidenedTickSink`, because
+# dlt refuses the wide int before the hint is ever consulted.
+
+
 def _hint(data_type: str, *, nullable: bool, **extra: object) -> dict[str, object]:
+    """One hint dict, built fresh — never a shared constant.
+
+    dlt writes the column's own `name` into the hint it is handed, so two
+    columns sharing a dict end up claiming the same name and dlt merges them
+    into one. It warns, and then lands a table quietly missing columns.
+    """
     return {"data_type": data_type, "nullable": nullable, **extra}
 
 
