@@ -54,7 +54,7 @@ from data_pipeline_core.ingestion.http import HttpClient
 from bench.volume import sessions
 from collector import adapters
 from collector.main import resolve_shards
-from collector.model import LevelRow
+from collector.model import ARROW_SCHEMA, CLOCKS, LevelRow
 from collector.settings import CollectorSettings
 
 # Rows loaded per sort-key candidate. Two orders of magnitude below the ~10⁹
@@ -99,41 +99,11 @@ _COLUMNS = """
     size_lots    Nullable(Decimal(38, 0))
 """
 
-# **`Int64` cannot hold a scaled tick, and this is where that was found.**
-# `SCALE = 8` puts the ceiling at (2^63 - 1)/10^8, about 9.2e10, and Kraken's
-# depth-1000 `BCH/USD` book carries an ask at 886,110,000,000.00 — a junk order
-# parked far from the touch, entirely real, and 8.9e19 once scaled. Python's
-# int does not care and every test to date used one symbol near the touch, so
-# nothing had reached a columnar type before now.
-#
-# `Decimal(38, 0)` is a 128-bit integer with a decimal face: exact, wide enough
-# for any price a venue can quote at this scale, and it costs 16 bytes a value
-# instead of 8. The alternative — keep `Int64` and refuse the row — would mean
-# one junk order on one symbol killing the run, which is the trade `scaled_int`
-# already refuses to make in the other direction.
-_TICKS = pa.decimal128(38, 0)
-
-# Arrow holds the clocks as int64 nanoseconds — the model's own unit — and they
-# are cast to a timestamp only when a batch is handed to the server. Tiling is
-# integer addition on those columns, so doing it in the native unit keeps the
-# arithmetic exact and the cast zero-copy.
-_CLOCKS = ("exchange_ts", "receive_ts", "monotonic_ts")
-_SCHEMA = pa.schema(
-    [
-        ("venue", pa.string()),
-        ("symbol", pa.string()),
-        ("seq", pa.int64()),
-        ("exchange_ts", pa.int64()),
-        ("receive_ts", pa.int64()),
-        ("monotonic_ts", pa.int64()),
-        ("action", pa.string()),
-        ("side", pa.string()),
-        ("price_str", pa.string()),
-        ("price_ticks", _TICKS),
-        ("size_str", pa.string()),
-        ("size_lots", _TICKS),
-    ]
-)
+# The schema moved to `collector/model.py` in Phase 7, with the paragraphs on
+# why ticks are 128-bit and why the clocks stay int64 nanoseconds. It is the
+# shipping sink's schema now, not the bench's, and this reads it so the two
+# cannot drift. Tiling below is integer addition on those clock columns, which
+# is exact for the same reason the model gives.
 
 
 def corpus(venue: str, path: Path, limit: int) -> pa.Table:
@@ -147,8 +117,12 @@ def corpus(venue: str, path: Path, limit: int) -> pa.Table:
         for record in session:
             rows.extend(router.transform(record, ctx))
             if len(rows) >= limit:
-                return pa.Table.from_pylist(cast(list[dict[str, Any]], rows), _SCHEMA)
-    return pa.Table.from_pylist(cast(list[dict[str, Any]], rows), _SCHEMA)
+                return _table(rows)
+    return _table(rows)
+
+
+def _table(rows: list[LevelRow]) -> pa.Table:
+    return pa.Table.from_pylist(cast(list[dict[str, Any]], rows), ARROW_SCHEMA)
 
 
 def _shift(table: pa.Table, tile: int, span_ns: int, seq_span: int) -> pa.Table:
@@ -160,7 +134,7 @@ def _shift(table: pa.Table, tile: int, span_ns: int, seq_span: int) -> pa.Table:
     """
     if tile == 0:
         return table
-    for column in _CLOCKS:
+    for column in CLOCKS:
         index = table.schema.get_field_index(column)
         shifted = pc.add(table.column(column), pa.scalar(tile * span_ns, pa.int64()))
         table = table.set_column(index, column, shifted)
@@ -194,7 +168,7 @@ def batches(table: pa.Table, total: int, size: int) -> Iterator[pa.Table]:
 def _for_insert(table: pa.Table) -> pa.Table:
     """Cast the clocks to the timestamps the table's columns are declared as."""
     stamp = pa.timestamp("ns", tz="UTC")
-    for column in _CLOCKS:
+    for column in CLOCKS:
         index = table.schema.get_field_index(column)
         field = table.schema.field(index).with_type(stamp)
         table = table.set_column(index, field, table.column(column).cast(stamp))

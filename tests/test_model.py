@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from collector.model import scaled_int
+from collector.model import ARROW_SCHEMA, LevelRow, scaled_int
 
 _FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -82,3 +82,25 @@ def test_scaled_int_refuses_to_truncate() -> None:
 def test_scaled_int_does_not_round_trip_through_float() -> None:
     # 0.1 + 0.2 is the canonical float failure; the decimal path must not care.
     assert scaled_int("0.30000000", 8) == 30_000_000
+
+
+def test_the_arrow_schema_matches_the_typed_dict() -> None:
+    """The record model is stated twice; this is what keeps them one model.
+
+    Field-for-field and in order, because a columnar batch is positional: a
+    column added to `LevelRow` and forgotten here lands as a missing key that
+    `from_pylist` fills with nulls, silently, for the life of the dataset.
+    """
+    assert ARROW_SCHEMA.names == list(LevelRow.__annotations__)
+
+
+def test_every_nullable_field_is_nullable_in_arrow() -> None:
+    """`None` on a non-nullable column is an insert error, not a null."""
+    optional = {
+        name
+        for name, annotation in LevelRow.__annotations__.items()
+        if "None" in str(annotation)
+    }
+    assert optional, "the model has optional fields; the introspection found none"
+    for name in optional:
+        assert ARROW_SCHEMA.field(name).nullable, name
