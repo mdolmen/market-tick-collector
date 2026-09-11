@@ -1024,6 +1024,17 @@ Three lines were cut here in the September 2026 re-scope, and the reasons are in
 § *Re-scope*: the deliberate-overload backpressure policy, the venue top-N match rate, and
 the profiled-hotspot before/after.
 
+**Phase 7 answered the first three, and `DEVELOPMENT.md` § *Phase 7* has them with their
+denominators.** Live: Kraken, 185 symbols at depth 1000, 2,048,719 rows in 300s — sustained
+6,852 rows/s, burst 41,576 rows/s. Ceiling: 62,618 rows/s through decode → book → Arrow →
+sink, socket excluded, against 85,236 rows/s for the same corpus with the sink removed. p99
+receive-to-disk 2,286 ms, which is the 2.0s flush trigger plus the close, and is therefore a
+*configuration* result more than a code one — a consumer wanting a tighter tail lowers
+`batch_max_seconds` and pays in insert count.
+
+The live figure and the ceiling are two numbers and appear here as two. Anyone quoting one
+of them as the other is quoting a number this project spent a phase learning not to merge.
+
 A committed benchmark harness with reproducible numbers matters more than any individual
 optimisation.
 
