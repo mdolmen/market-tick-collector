@@ -1059,3 +1059,112 @@ the server to recognise them. A replay at a fixed row trigger does; a process th
 a partial batch buffered resumes on a different boundary and duplicates. Both halves are
 asserted in `tests/test_clickhouse.py` rather than left as a caveat in prose, because a
 stated limit nobody tested is a hope.
+
+### The measurement
+
+Apple M-series laptop, Python 3.11, ClickHouse 25.8 in Docker (`compose.yaml`), one node,
+same machine as the collector — so every insert number below is loopback and none of them is
+a claim about a managed service across a network. Reproduce with:
+
+```
+docker compose up -d
+uv run python -m bench.storage kraken data/capture/kraken-p3
+MTC_VENUE=kraken MTC_SYMBOLS='*' MTC_OUTPUT=clickhouse MTC_DURATION_S=300 \
+  uv run python -m collector.main
+```
+
+**Live — Kraken, 185 symbols at depth 1000, 300s, all books live at exit.** 2,048,719 rows
+landed across 142 flushes; the server's own `count()` agrees exactly. Zero gaps, zero crossed
+books, zero checksum breaks.
+
+| | |
+|---|---|
+| Sustained | **6,852 rows/s** |
+| Burst, busiest arrival second | **41,576 rows/s** |
+| Receive-to-disk | p50 **1,195 ms**, p90 **2,042 ms**, p99 **2,286 ms** |
+
+**Replay ceiling — the same corpus through both arms**, 200,000 Kraken capture records →
+400,456 level rows, socket excluded:
+
+| arm | rows/s | µs/row |
+|---|---|---|
+| decode → book → row | 85,236 | 11.73 |
+| + Arrow + sink | **62,618** | 15.97 |
+
+The ceiling drops **26.5%** in rows/s; per-row time rises 36.1%. **These are not the same
+number as the live rate and are never quoted as one** — the live figure is bounded by what
+Kraken sends, the ceiling by this code.
+
+**Insert path**, 400,000 rows in 8 batches of 50,000:
+
+| path | rows/s | ms/batch |
+|---|---|---|
+| arrow | **1,093,040** | 45.7 |
+| row-oriented | 131,900 | 379.1 |
+
+**Batch conversion**, `dict` rows → `pa.RecordBatch`: 1,508,840 rows/s, 0.66 µs/row.
+
+### Grading the prediction
+
+**Wrong, prediction 1 — and wrong the useful way.** Arrow beat the row-oriented insert by
+**8.3×**, against a predicted 2–5×. The predicted *shape* held (large ratio, irrelevant to
+the running system at 70× headroom) but the magnitude was under-called by a factor of two.
+The named interesting failure — a ratio near 1×, which would have left the contract change
+resting on the record-representation argument alone — did not happen.
+
+**Roughly right, prediction 2.** Predicted p50 ≈ 1.0s / p90 ≈ 1.8s / p99 ≈ 2.0s from the
+reasoning that a row's latency is dominated by how long its batch stayed open; measured
+1.195s / 2.042s / 2.286s. Every percentile came in **above** the prediction, and the p99's
+286 ms over the 2.0s flush trigger is the part the prediction said would be "the insert plus
+the drain" — the insert alone is 45.7 ms, so most of that excess is the batch closing late
+rather than the write being slow. The mechanism was right and the arithmetic was optimistic.
+
+**Wrong, prediction 3.** Predicted the ceiling would drop by less than 20% with the sink in
+the loop; it dropped **26.5%**. The sink costs 4.24 µs/row, and conversion (0.66 µs) plus
+insert (0.91 µs) only account for 1.57 of it — so **roughly 2.7 µs/row is the streaming path
+itself**: the generator chain, the per-record clock read in `BatchingSink.write`, and holding
+50,000 rows before closing the batch. Benchmarking conversion and insert in isolation
+understates the sink by a factor of nearly three, which is the finding worth keeping: the
+parts measured apart do not add up to the whole.
+
+It does *not* follow that `from_pylist` is the problem. It is 0.66 µs/row against a book
+apply at 11.73 µs/row, so the column-wise builder `arrow_batching_sink`'s docstring holds in
+reserve would buy at most ~4% of the ceiling. That remains the right thing not to have built.
+
+**Prediction 4 held as stated, including the parts that said nothing could be graded.**
+
+- *The `dict` book holds up on writes.* It does, at 85,236 rows/s bare — an order of
+  magnitude above the live arrival rate. The read half stays ungraded; the read benchmark was
+  cut in the September re-scope.
+- *Reader thread vs asyncio, under 2×.* **Ungraded, and permanently so**: no asyncio
+  implementation was ever written, so there has never been anything to compare against. The
+  bullet was unfalsifiable from the day it was written.
+- *`Record = dict[str, Any]` dominant around 10⁵ rows/s.* The bare ceiling is 85,236 rows/s,
+  which brackets 10⁵ closely enough to be interesting and does not settle it, because nothing
+  here isolated the `dict`. And as the prediction said in advance, the Arrow sink does not
+  test this: the transform still yields one `dict` per row and `from_pylist` still walks
+  them. **Phase 7 graded the insert path; the record representation remains unmeasured.**
+
+**Prediction 5 held, and the bound is now a test rather than a caveat.** Replaying identical
+rows through the same row trigger lands nothing new; re-splitting the same rows at a
+different trigger duplicates every one of them. Both are asserted in
+`tests/test_clickhouse.py`, so the narrower guarantee cannot drift into the broader claim.
+
+### Two defects the numbers nearly hid
+
+Neither is a performance result, and both were found by running the thing at full symbol
+scale rather than by reading it.
+
+**The first cut of `bench/storage.py` measured the sink and labelled it the pipeline.** It
+built the level rows once, outside the timer, then timed the sink over them and printed
+"decode → book → Arrow → sink". The decode and the book had already happened. It reported
+419k rows/s — 6.7× the honest 62.6k — and it would have been a committed number. The bench
+now drives the transform inside the timed loop and runs both arms over one corpus.
+
+**The first cut of the burst metric reported `batch_max_rows`.** Rows were bucketed by the
+second their *batch landed*, so a 50,000-row batch that took six seconds to fill counted as
+50,000 rows in one instant. The first live run duly reported a burst of exactly 50,000
+rows/s — the trigger, not the feed. Rows are bucketed by `monotonic_ts` now, and the real
+burst is 41,576 rows/s against a 6,852 rows/s sustained: a 6.1× ratio, which is the
+bootstrap storm the shard planner was sized around and is a genuinely useful number. The
+fake one was a round 50,000 and looked plausible.
