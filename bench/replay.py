@@ -10,9 +10,12 @@ exists to prevent.
 
 **What the headline number covers**, exactly, and nothing more: capture record
 → ``parse_event`` → book apply → ``LevelRow`` built. It excludes the socket, and
-it excludes the sink — the Arrow batch sink is Phase 7, so the "through decode
-→ book → Arrow → sink" claim in ``NOTES.md`` is *not yet earned* and this must
-not be quoted as if it were.
+it excludes the sink.
+
+The sink is `bench/storage.py`, which landed in Phase 7 and runs both arms over
+one corpus — so the "through decode → book → Arrow → sink" claim in
+``NOTES.md`` is earned there and not here. Quote this number as the bare
+pipeline; quote that one when the sink is part of what is being claimed.
 
 The reader's own cost is reported beside it rather than folded in. Decoding the
 capture envelope is what a replay pays to stand in for a socket, so counting it

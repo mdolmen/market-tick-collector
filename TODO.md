@@ -120,18 +120,20 @@ is a legal `Source` and `WorkerApp` ran it untouched, so Phase 0 needed **zero**
 
 ## Phase 7 · Storage
 
-- [ ] `BatchSink[ArrowBatch]` contract in `data-pipeline-core`
-- [ ] Arrow `RecordBatch` accumulation, flush on size or time
-- [ ] Receive-to-disk p50 / p90 / p99 — deferred from Phase 0, meaningless before this sink
-- [ ] Sustained throughput and burst capacity at full shard scale, from the same run
-- [ ] Live rate and replay ceiling reported apart, both labelled
-- [ ] Compare against the Phase 0 architecture prediction, whichever way it went
-- [ ] Pin the landed column schema: dlt drops an all-null column, so files in one dataset
+- [x] `BatchSink[ArrowBatch]` contract in `data-pipeline-core`
+- [x] Arrow `RecordBatch` accumulation, flush on size or time
+- [x] Receive-to-disk p50 / p90 / p99 — deferred from Phase 0, meaningless before this sink
+- [x] Sustained throughput and burst capacity at full shard scale, from the same run
+- [x] Live rate and replay ceiling reported apart, both labelled
+- [x] Compare against the Phase 0 architecture prediction, whichever way it went
+- [x] Pin the landed column schema: dlt drops an all-null column, so files in one dataset
       disagree and a naive per-file read fails (seen in Phase 0 on `exchange_ts`)
 - [x] ClickHouse as the primary sink
-- [ ] Rotating Parquet on GCS partitioned by `date/symbol` as the archive tier
-- [ ] Retention and tiering rule sized for 10⁹ rows/day
-- [ ] Idempotent writes across restart via deterministic ids — a replayed batch cannot duplicate
+- [x] ~~Rotating Parquet on GCS partitioned by `date/symbol` as the archive tier~~ — cut:
+      business logic, and the phase's priority was the SDK contract. See `NOTES.md`
+- [x] ~~Retention and tiering rule sized for 10⁹ rows/day~~ — cut with the tier it would
+      have tiered to; `bench/volume.py` still measures the input a rule would need
+- [x] Idempotent writes across restart via deterministic ids — a replayed batch cannot duplicate
 
 ## Phase 8 · Reconciliation — cut
 
