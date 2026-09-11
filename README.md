@@ -3,63 +3,21 @@
 High-volume L2 order book capture from public crypto exchange websockets, and the second
 consumer of [`data-pipeline-core`](../data-pipeline-core).
 
-This is not a crypto project. Crypto because free high-volume L2 data. No trading, no strategy, no signal. It is a data platform, and the interesting problems are book reconstruction, sequence gaps, backpressure and reconciliation.
+This is not a crypto project. Crypto because free high-volume L2 data. No trading, no strategy, no signal. Its aim is to be a realistic use case to extract features to go in the SDK mentioned above.
 
 ## In numbers
 
-The write path is complete: three venues, sharded across supervised connections, books
-reconstructed from diffs and landed in ClickHouse through an Arrow batch sink. Phase 9's read
-layer was cut for want of a caller (`NOTES.md` § *The read layer*), so the way out of the
-table is SQL or `tools/book.py`.
+**Three venues** — Binance spot, Coinbase Advanced Trade, Kraken v2.
 
-**One live run — Kraken, 185 symbols at depth 1000, 300s, every book live at exit.**
-2,048,719 rows across 142 flushes; the server's own `count()` agrees exactly. Zero gaps, zero
-crossed books, zero checksum breaks.
+**188 symbols** — every base asset quoted against all three venues' USD-ish market, resolved
+against their live instrument lists rather than hand-listed. Binance and Coinbase run all 188;
+Kraken runs 185, because `BONK`, `PEPE` and `SHIB` quote to nine decimal places there and this
+project is fixed at eight.
 
-| | |
-|---|---|
-| Sustained | **6,852 rows/s** |
-| Burst, busiest arrival second | **41,576 rows/s** (6.1× sustained — the bootstrap storm) |
-| Receive-to-disk | p50 **1,195 ms**, p90 **2,042 ms**, p99 **2,286 ms** |
-
-Latency is the batch, not the write: the flush trigger is 2.0s and the insert itself is
-45.7 ms. **Binance's p99 on a comparable run is 13,878 ms**, and that number measures snapshot
-latency rather than write latency — a book still waiting on its out-of-band REST snapshot
-buffers frames that keep their arrival clock, so the splice lands them with the whole wait
-attached. The same percentile means different things on two venues, which is why it is
-reported per venue and never averaged.
-
-**Two rates, and they are never merged.** The live figure is bounded by what the venue sends;
-the ceiling is bounded by this code. Both from the same 200,000-record Kraken corpus, socket
-excluded:
-
-| | rows/s | µs/row |
-|---|---|---|
-| decode → book apply → row built | 85,236 | 11.73 |
-| the same, with Arrow and the sink in the loop | **62,618** | 15.97 |
-
-The sink costs 26.5% of the ceiling. Conversion (0.66 µs/row) and insert (0.91 µs/row) account
-for only 1.57 µs of the 4.24 µs it adds — **the parts measured apart do not add up to the
-whole**, and the remainder is the streaming path itself.
-
-**The insert path**, 400,000 rows in 8 batches of 50,000: Arrow **1,093,040 rows/s** against
-131,900 for the row-oriented path — 8.3×, and irrelevant to the running system at 70×
-headroom over live arrival. The sort key `(venue, symbol, receive_ts, seq)` was chosen by
-measurement too: 258 MB against 344 MB over ten million identical rows, and 16,385 rows read
-against 458,752 for a one-symbol, one-minute window.
-
-**Correctness has its own numbers, and there are two of them.** The REST oracle diffs the
-reconstructed book against Binance's own periodic snapshot, id-aligned: **45 comparisons, 45
-clean, 0 diverging levels in 446,830 compared**, with 3 comparisons unaligned (93.8%
-coverage). Kraken's CRC32 over the venue's top ten is a second, independent check, and it
-broke **zero** times across the 185-symbol run. The two are reported apart because they are
-different claims.
-
-The throughput and correctness numbers were predicted in writing *before* the runs and graded
-afterwards, including where the prediction lost: the Arrow ratio was under-called by a factor
-of two, and the sink's cost to the ceiling was predicted under 20% against a measured 26.5%.
-`DEVELOPMENT.md` has each prediction, its grade, the predictions that turned out ungradeable,
-and the two benchmark defects that nearly shipped a 6.7× overstatement as a committed number.
+**Full depth on two of the three.** Binance streams full-depth diffs at 100 ms, bootstrapped
+from a `limit=5000` REST snapshot; Coinbase sends its snapshot in band on `level2`, ~4.9 MB
+for BTC-USD. Kraken has no full-depth channel at all — `depth` is one of 10/25/100/500/1000 —
+so its book is a top-1000 one by construction, running at the venue's ceiling.
 
 ## Architecture
 
@@ -88,42 +46,6 @@ flowchart TB
     SINK --> CH
     SINK --> PQ
 ```
-
-The double line is the normalization boundary. Everything below it has been handed normalized
-records and cannot tell which venue produced them. Everything above it — including the adapter
-itself, which is the one thing allowed to know — is the venue's problem.
-
-Two properties fall out of where that line sits. The raw landing is captured *above* it, so a
-session is stored as the venue sent it and a parser bug never costs data — and a replay
-re-enters at the same point, driving the *same* book code a socket drives, which is what makes
-fault injection meaningful rather than a second implementation being tested. And the fault
-injector perturbs capture records without having heard of either venue, which is why it worked
-unchanged on the second dialect and then the third.
-
-## The normalization boundary, and the one place it leaks
-
-An adapter's only job is turning one venue's frames into the normalized record model. The
-book, the router, the batching sink, the oracle and the metrics never learn which venue a
-record came from except as a label. `tests/test_boundary.py` asserts that statically rather
-than trusting it.
-
-**The leak is real and it is confined.** Sequencing semantics genuinely differ per venue, and
-no amount of modelling makes them the same: Binance chains overlapping `[U, u]` ranges and
-bootstraps from an out-of-band REST snapshot; Coinbase chains a single per-connection
-`sequence_num` and sends its snapshot in band; Kraken numbers *nothing at all*. That difference
-stays inside the adapter, behind three booleans — `in_sequence`, `gap_detected`,
-`snapshot_required` — and nothing downstream can ask a fourth question. Naming the exception
-is the design; pretending it does not exist would have put venue conditionals in the book.
-
-Kraken is what made the contract earn its keep. With no sequence of any kind the chain rule is
-trivially true and proves nothing, so a CRC32 over the venue's own top ten is the only
-integrity signal there is — which is why the adapter and the checksum shipped in one commit. It
-costs 8.5 µs a message at depth 1000, against 73.9 µs done the obvious way (`bench/checksum.py`).
-
-Adding it found a bug in the two venues already shipped: a snapshot arriving at a healthy book
-was ignored as redundant, which holds for Binance's REST read and does not hold for one
-obtained by resubscribing. 43 crossed books in a replay whose every checksum passed.
-`DEVELOPMENT.md` § Phase 2.5.
 
 ## Running it
 
@@ -156,9 +78,7 @@ uv run python -c "import pyarrow.dataset as ds; \
     print(ds.dataset('data/l2/l2/levels', format='parquet').to_table().num_rows)"
 ```
 
-Land in ClickHouse instead — a whole venue's shard, which is what the numbers above were
-measured on. `compose.yaml` brings up the local node the sink was measured against; it is not
-a deployment:
+Land in ClickHouse instead — a whole venue's shard. `compose.yaml` brings up the local node the sink was measured against; it is not a deployment:
 
 ```bash
 docker compose up -d
@@ -254,19 +174,17 @@ unsubscribe/subscribe pair rather than a REST fetch — the venue never re-sends
 
 ## Venue reconnaissance
 
-Before an adapter is written, the venue's live channel is *looked at* rather than recalled:
+Before an adapter is written, the venue's live channel is looked at:
 
 ```bash
 uv run python -m tools.probe coinbase --duration 30   # message shapes, clocks, precision
 uv run python -m tools.symbols                        # the overlapping base assets
 ```
 
-`DEVELOPMENT.md` § Phase 2 records what the survey found, including the two feeds Coinbase
-publishes that differ in whether a lost message is detectable at all.
-
 ## Benchmarks
 
-Every number in this README comes from one of these, and an uncommitted number is not a claim:
+Throughput, latency and footprint numbers live in `DEVELOPMENT.md`, each beside the prediction
+it was graded against. These are what produce them — an uncommitted number is not a claim:
 
 ```bash
 uv run python -m bench.storage  kraken data/capture/kraken-p3  # ceiling with the sink in the loop
@@ -282,51 +200,28 @@ uv run python -m bench.volume   data/capture/kraken-p3         # rows/day at ful
 
 ## The SDK diff
 
-[`data-pipeline-core`](../data-pipeline-core) was built for a batch consumer: one-shot jobs
-that fetch, transform, write and exit. This repo is the second consumer and it streams, which
-is the entire reason it exists — **when the SDK does not fit, the SDK changes**, and a
-workaround here would have proved nothing. What follows is what that cost, including the part
-that reads badly.
+[`data-pipeline-core`](../data-pipeline-core) was built for one-shot batch jobs. This repo
+streams, so what did not fit was changed in the SDK rather than worked around here — while
+venue logic, symbol normalization and the venue caps stayed out of it. What landed:
 
-**What `ServiceApp` forced was the run loop, not the contracts.** `Source` was already allowed
-to yield forever, `Transform` was already lazy, and `Sink.write` already took a stream rather
-than a list — so an endless generator was a legal `Source` before any of this was written.
-What actually broke was start → work → push → exit: metrics pushed once in a `finally` means
-*never* for a process that runs for days; a job that either exited 0 or did not gives an
-orchestrator nothing to probe; and a shutdown that does not drain loses the batch still open.
-Three real defects, zero protocol changes. That the pipeline contracts survived a consumer
-they were not designed for is the strongest evidence the repo produced about them.
+| | |
+|---|---|
+| `ServiceApp` | run until stopped, health endpoint, periodic metrics push, graceful drain |
+| `BatchSink[BatchT]` | parameterized by the *batch*, not the record, so a `pa.RecordBatch` is expressible. Re-parameterized from `BatchSink[RecordT]` — a second breaking change on the same surface |
+| `arrow_batching_sink` | flush on rows or seconds, closing into a `pa.RecordBatch` |
+| `ConnectionSupervisor` | N connections behind the one-source contract, per-connection health, no shared fate |
+| `RunContext.metrics` | the run's registry, so a `Source` can publish its own series |
+| `queue_depth`, `messages_dropped_total{reason}` | a deliberate widening of the frozen metric surface |
+| `dlt_sink(columns=...)` | pin the landed schema, so a dataset's files agree |
 
-**What did break was the batch sink, and it broke twice on the same surface.** `BatchSink`
-shipped in Phase 4 as `BatchSink[RecordT]` with `write_batch(Sequence[RecordT])` — a
-row-oriented insert path that cannot express a columnar one, because a `pa.RecordBatch` is not
-a sequence of records under any spelling. Parameterising by the *batch* instead of the record
-fixed it, and made both `BatchSink[Sequence[LevelRow]]` and `BatchSink[pa.RecordBatch]` legal
-with one set of flush triggers. That is a second SemVer-major event on the public contract, and
-it is the honest cost of having designed the first one against a single consumer's first
-destination.
+**The protocols themselves were never touched.** `Source` was already allowed to yield forever
+and `Sink.write` already took a stream, so an endless generator was a legal `Source` before any
+of this existed. What broke was the run loop, not the contract.
 
-Also promoted, each because something here could not be written without it: `RunContext.metrics`
-(nothing inside a `Source` could publish a series, so a consumer could measure something and
-had nowhere to put it), `ConnectionSupervisor` (N connections behind the one-source contract,
-no shared fate), `queue_depth` and `messages_dropped_total{reason}` as a deliberate widening of
-the frozen metric surface, and `dlt_sink(columns=...)` to pin a landed schema — dlt infers per
-load, so a load where a nullable column happens to be entirely null does not land that column
-and the dataset stops being readable as one thing.
-
-**What stayed here, and would have been the easy mistake:** symbol normalization, the venue
-tables and caps, the sequencing dialects, Kraken's checksum, the REST oracle, which streams
-shard onto which socket. All of it looks reusable and none of it is generic.
-
-**Two gaps are open and neither is fixed.** A `Sink` never sees a `RunContext`, so it is the
-one slot in the pipeline that can measure something and has nowhere to publish it — Phase 7 hit
-this measuring receive-to-disk, which is a *sink* quantity by construction, and worked around
-it by reporting at exit instead of exporting a histogram. Closing it changes `Sink.write`, a
-third major event on the same surface, and it waits until something is actually asking to
-scrape the number. The second is that the SDK can write a curated dataset and cannot read one
-back; the `DatasetReader` that would have closed it was cut, because neither consumer has a
-caller for it and building one anyway would have been the thing this section exists to argue
-against.
+**Two gaps left open.** A `Sink` never sees a `RunContext`, so it is the one slot that can
+measure something and has nowhere to publish it. And the SDK can write a curated dataset and
+cannot read one back — the `DatasetReader` that would have closed it was cut, neither consumer
+having a caller for it.
 
 ## Development
 
@@ -335,17 +230,3 @@ uv run ruff check . && uv run ruff format --check .
 uv run mypy                # strict
 uv run pytest
 ```
-
-Tests replay a recorded Binance bootstrap — twelve consecutive frames with a live REST
-snapshot taken part-way through — so the splice branches are exercised against real sequence
-ranges rather than invented ones. The recovery path is reached through the fault injector: a
-venue will not drop packets on request, and a fault asserted by hand tests the assertion.
-
-The Coinbase suite runs the *same* injector over a stream numbered the way that venue numbers
-it — every message on the connection, acks included. That the injector needed no change to
-work on a second dialect is the actual evidence the boundary holds; it perturbs capture
-records and has never heard of either venue.
-
-One caveat the fault tests state rather than hide: a fault landing on an already-untrusted
-book opens no second interval, so the honest denominator for a detection rate is faults
-injected against a *trusted* book.
