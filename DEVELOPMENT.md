@@ -1168,3 +1168,38 @@ rows/s — the trigger, not the feed. Rows are bucketed by `monotonic_ts` now, a
 burst is 41,576 rows/s against a 6,852 rows/s sustained: a 6.1× ratio, which is the
 bootstrap storm the shard planner was sized around and is a genuinely useful number. The
 fake one was a round 50,000 and looked plausible.
+
+### Binance, partial — and the latency tail has a second mechanism
+
+A second live run, Binance, 188 symbols, 300s. **It is not a full-shard-scale result and is
+not quoted as one**: only **39 of 188** books ever reached `live`, because the run ended
+while the rest were still bootstrapping. 306,510 rows, 143 flushes, zero gaps and zero
+crossed books among the books that did come up.
+
+| | Kraken (185/185 live) | Binance (39/188 live) |
+|---|---|---|
+| Sustained | 6,852 rows/s | 1,036 rows/s |
+| Burst | 41,576 rows/s | 10,856 rows/s |
+| Receive-to-disk p50 | 1,195 ms | 1,324 ms |
+| Receive-to-disk p90 | 2,042 ms | 2,239 ms |
+| Receive-to-disk p99 | 2,286 ms | **13,878 ms** |
+
+**That p99 is the finding, and it is not the sink.** p50 and p90 sit where Kraken's do,
+against the same 2.0s flush trigger — so steady-state latency is the batch, exactly as
+predicted. The tail is six times worse, and the cause is the bootstrap: a book that is
+waiting for its REST snapshot **buffers frames**, and those frames keep the `monotonic_ts`
+of when they arrived. When the snapshot finally lands, the splice replays them, and their
+receive-to-disk includes the whole wait. So the tail measures **snapshot latency, not write
+latency** — on a venue whose snapshot is out-of-band and rate-limit paced.
+
+Kraken does not show it because Kraken's snapshot is in-band: a subscribe returns the book,
+so nothing buffers for long. The same number means different things on the two venues, which
+is the kind of thing a single headline percentile would have hidden. Reported per venue.
+
+**Why the run was partial, measured rather than guessed.** Binance bootstrapped at **0.13
+books/s** (18 books in 142s, one REST depth call each at `snapshot_limit=5000`), so 188 books
+need ~25 minutes before the last one is live. A second attempt at `MTC_DURATION_S=600` was
+abandoned for the same reason. **This is a Phase 3 pacing result surfacing late, not a
+storage one** — nothing in Phase 7 touched the snapshot path — but it means "Binance at full
+shard scale" is not reachable in a bounded run as currently paced, and any future run that
+needs it should budget the bootstrap separately from the measurement window.
