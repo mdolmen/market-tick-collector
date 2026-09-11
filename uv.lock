@@ -850,7 +850,7 @@ wheels = [
 
 [[package]]
 name = "data-pipeline-core"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "../data-pipeline-core" }
 dependencies = [
     { name = "curl-cffi" },
@@ -859,6 +859,7 @@ dependencies = [
     { name = "gcsfs" },
     { name = "httpx" },
     { name = "prometheus-client" },
+    { name = "pyarrow" },
     { name = "pydantic-settings" },
     { name = "redis" },
     { name = "structlog" },
@@ -872,6 +873,7 @@ requires-dist = [
     { name = "gcsfs", specifier = ">=2023" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "prometheus-client", specifier = ">=0.20" },
+    { name = "pyarrow", specifier = ">=14" },
     { name = "pydantic-settings", specifier = ">=2,<3" },
     { name = "redis", specifier = ">=5" },
     { name = "structlog", specifier = ">=24" },

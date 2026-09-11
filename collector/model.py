@@ -104,6 +104,7 @@ ARROW_SCHEMA = pa.schema(
     ]
 )
 
+
 # The same model a third time, in dlt's hint spelling, for the Parquet tier.
 # **Pinned because dlt infers per load**, and a load in which `exchange_ts` is
 # entirely null — which is every Binance REST snapshot — does not land the
