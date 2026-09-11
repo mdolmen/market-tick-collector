@@ -14,13 +14,15 @@ that measurement is quoted against.
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable, Iterator, Mapping
+import time
+from collections import Counter
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 
 import clickhouse_connect
 import pyarrow as pa
-from data_pipeline_core import Sink, WriteResult, deterministic_id
+from data_pipeline_core import BatchSink, Sink, WriteResult, deterministic_id
 
 from collector.model import ARROW_SCHEMA, CLOCKS, LevelRow
 
@@ -181,6 +183,95 @@ class ClickHouseSink:
 
     def close(self) -> None:
         self._client.close()
+
+
+class TimedBatchSink:
+    """Wraps a ``BatchSink``, timing what its batches waited for.
+
+    Two quantities, and they are different questions. **Receive-to-disk** is per
+    row — `now - monotonic_ts` once the insert returns — and is dominated by how
+    long the row's batch stayed open, which is what `NOTES.md` § *Flush
+    triggers* means by calling the time trigger a latency setting. **Throughput**
+    is per flush: rows and the wall clock they landed at, which is what a
+    sustained rate and a burst are computed from afterwards.
+
+    The rows are counted at flush rather than sampled, because a burst is
+    exactly the thing sampling loses.
+
+    **Live modes only.** A replay's `monotonic_ts` came out of a capture file
+    written days ago, so the latency here would be the age of the corpus under
+    a label that reads like a pipeline measurement. `collector/main.py` wires
+    this for `collect` and `service`, never for `replay`.
+
+    **Reported at exit rather than exported as a series, and the reason is a
+    seam rather than a preference.** `Source.fetch(ctx)` and
+    `Transform.transform(record, ctx)` both receive a `RunContext`;
+    `Sink.write(records)` does not, and the run's registry is built inside
+    `build_runtime`. So a sink is the one slot in the SDK that can measure
+    something and has nowhere to publish it — which is the gap
+    `RunContext.metrics` was added to close for the other two. Recorded in
+    `NOTES.md` § *The SDK gaps*; closing it means changing `Sink.write`, which
+    is a second SemVer-major event and wants a dashboard asking for it first.
+    """
+
+    def __init__(self, inner: BatchSink[pa.RecordBatch]) -> None:
+        self._inner = inner
+        # Per-row receive-to-disk, in seconds. At ~12,000 rows/s a ten-minute
+        # run holds ~7M floats — roughly 60 MB, which is affordable for a bench
+        # run and is why this is wired by mode rather than always.
+        self.latencies: list[float] = []
+        # (landed_at, rows) per flush, in order. A 600s run at the 2s trigger is
+        # ~300 entries, so holding them costs nothing and lets the summary
+        # compute a burst over any window it likes.
+        self.flushes: list[tuple[float, int]] = []
+
+    def write_batch(self, batch: pa.RecordBatch) -> WriteResult:
+        result = self._inner.write_batch(batch)
+        landed = time.monotonic_ns()
+        self.latencies.extend(
+            (landed - received) / 1e9
+            for received in batch.column("monotonic_ts").to_pylist()
+        )
+        self.flushes.append((landed / 1e9, batch.num_rows))
+        return result
+
+    def close(self) -> None:
+        self._inner.close()  # type: ignore[attr-defined]
+
+    def summary(self) -> dict[str, float]:
+        """Receive-to-disk percentiles, and the two rates, from one run.
+
+        Sustained is rows over the span the flushes cover — not over the run's
+        wall clock, which would include the subscribe and bootstrap before the
+        first row existed. Burst is the busiest one-second bucket, which is the
+        number `TODO.md` asks for beside the sustained one and the reason the
+        flushes are kept rather than accumulated.
+        """
+        if len(self.flushes) < 2:
+            return {}
+        rows = sum(count for _, count in self.flushes)
+        span = self.flushes[-1][0] - self.flushes[0][0]
+        buckets: Counter[int] = Counter()
+        for landed, count in self.flushes:
+            buckets[int(landed)] += count
+        ordered = sorted(self.latencies)
+        return {
+            "flushes": len(self.flushes),
+            "rows": rows,
+            "sustained_rows_s": rows / span if span > 0 else 0.0,
+            "burst_rows_s": float(max(buckets.values())),
+            "receive_to_disk_p50_ms": _percentile(ordered, 0.50) * 1000,
+            "receive_to_disk_p90_ms": _percentile(ordered, 0.90) * 1000,
+            "receive_to_disk_p99_ms": _percentile(ordered, 0.99) * 1000,
+        }
+
+
+def _percentile(ordered: Sequence[float], fraction: float) -> float:
+    """Nearest-rank on an already-sorted sequence; 0.0 when there is nothing."""
+    if not ordered:
+        return 0.0
+    rank = min(int(fraction * len(ordered)), len(ordered) - 1)
+    return ordered[rank]
 
 
 def _batch_token(batch: pa.RecordBatch) -> str:

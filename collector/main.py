@@ -56,7 +56,9 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping
 
+import pyarrow as pa
 from data_pipeline_core import (
+    BatchSink,
     ServiceApp,
     Sink,
     WorkerApp,
@@ -74,7 +76,12 @@ from collector.replay import FaultConfig, ReplaySource
 from collector.router import BookRouter
 from collector.settings import CollectorSettings
 from collector.shard import plan_shards, shard_size
-from collector.sinks import ClickHouseSink, ConsoleSink, WidenedTickSink
+from collector.sinks import (
+    ClickHouseSink,
+    ConsoleSink,
+    TimedBatchSink,
+    WidenedTickSink,
+)
 from collector.source import FrameSource
 from collector.supervisor import ShardSupervisor
 from collector.symbols import tradable
@@ -160,7 +167,15 @@ def _source(settings: CollectorSettings) -> ShardSupervisor:
     )
 
 
-def _row_sink(settings: CollectorSettings) -> Sink[LevelRow]:
+def _row_sink(
+    settings: CollectorSettings, timed: list[TimedBatchSink]
+) -> Sink[LevelRow]:
+    """The curated destination, and a handle on it when it is worth timing.
+
+    ``timed`` collects the wrapper so ``main`` can report its numbers at exit —
+    the same reason the router is built out here rather than inside a builder:
+    ``run()`` returns an exit code and the run's actual result is elsewhere.
+    """
     if settings.output == "console":
         return ConsoleSink()
     if settings.output == "clickhouse":
@@ -168,12 +183,19 @@ def _row_sink(settings: CollectorSettings) -> Sink[LevelRow]:
         # `bench/clickhouse.py`; the sink itself only knows how to write a
         # batch it is handed. The schema is this project's and is pinned, so
         # every batch is the same shape whatever the rows happened to contain.
+        batches: BatchSink[pa.RecordBatch] = ClickHouseSink(
+            settings.clickhouse_dsn,
+            settings.clickhouse_table,
+            dedup_window=settings.clickhouse_dedup_window,
+        )
+        # Only where `monotonic_ts` was stamped by this process. A replay's
+        # came from the capture, so timing it would measure the corpus's age.
+        if settings.mode in ("collect", "service"):
+            wrapper = TimedBatchSink(batches)
+            timed.append(wrapper)
+            batches = wrapper
         return arrow_batching_sink(
-            ClickHouseSink(
-                settings.clickhouse_dsn,
-                settings.clickhouse_table,
-                dedup_window=settings.clickhouse_dedup_window,
-            ),
+            batches,
             schema=ARROW_SCHEMA,
             max_rows=settings.batch_max_rows,
             max_seconds=settings.batch_max_seconds,
@@ -201,31 +223,31 @@ def build_capture_app(
 
 
 def build_collect_app(
-    settings: CollectorSettings, router: BookRouter
+    settings: CollectorSettings, router: BookRouter, timed: list[TimedBatchSink]
 ) -> WorkerApp[CaptureRecord, LevelRow]:
     """The Phase 0 path: socket to level rows, with the books in between."""
     return WorkerApp(
         _source(settings),
-        _row_sink(settings),
+        _row_sink(settings, timed),
         transform=router,
         settings=settings,
     )
 
 
 def build_service_app(
-    settings: CollectorSettings, router: BookRouter
+    settings: CollectorSettings, router: BookRouter, timed: list[TimedBatchSink]
 ) -> ServiceApp[CaptureRecord, LevelRow]:
     """The collect wiring with no end to it: run until stopped, then drain."""
     return ServiceApp(
         _source(settings),
-        _row_sink(settings),
+        _row_sink(settings, timed),
         transform=router,
         settings=settings,
     )
 
 
 def build_replay_app(
-    settings: CollectorSettings, router: BookRouter
+    settings: CollectorSettings, router: BookRouter, timed: list[TimedBatchSink]
 ) -> WorkerApp[CaptureRecord, LevelRow]:
     """The same router, fed from disk instead of from a socket."""
     source = ReplaySource(
@@ -234,7 +256,9 @@ def build_replay_app(
         speed=settings.replay_speed,
         faults=FaultConfig.from_names(settings.faults, seed=settings.fault_seed),
     )
-    return WorkerApp(source, _row_sink(settings), transform=router, settings=settings)
+    return WorkerApp(
+        source, _row_sink(settings, timed), transform=router, settings=settings
+    )
 
 
 def main() -> int:
@@ -244,15 +268,24 @@ def main() -> int:
 
     # The router is held here rather than inside the builder because its
     # counters and the books it ends with are the run's actual result, and
-    # ``run()`` returns only an exit code.
+    # ``run()`` returns only an exit code. The timed sink is held for the same
+    # reason: a `Sink` never sees a `RunContext`, so the numbers it collected
+    # have no other way out of the run. See `collector.sinks.TimedBatchSink`.
     router, _ = adapters.build_router(settings, resolve_shards(settings))
+    timed: list[TimedBatchSink] = []
     if settings.mode == "service":
-        code = build_service_app(settings, router).run()
+        code = build_service_app(settings, router, timed).run()
     elif settings.mode == "collect":
-        code = build_collect_app(settings, router).run()
+        code = build_collect_app(settings, router, timed).run()
     else:
-        code = build_replay_app(settings, router).run()
-    get_logger().info("books", mode=settings.mode, **router.summary())
+        code = build_replay_app(settings, router, timed).run()
+    log = get_logger()
+    log.info("books", mode=settings.mode, **router.summary())
+    for sink in timed:
+        # Two numbers that are never merged: the sustained rate is bounded by
+        # the venues, the burst by this code. Both are live-run figures and
+        # neither is the replay ceiling `bench/storage.py` reports.
+        log.info("storage", mode=settings.mode, **sink.summary())
     return code
 
 

@@ -17,7 +17,7 @@ from data_pipeline_core import arrow_batching_sink
 
 from collector.model import ARROW_SCHEMA, LevelRow
 from collector.settings import CollectorSettings
-from collector.sinks import ClickHouseSink
+from collector.sinks import ClickHouseSink, TimedBatchSink
 
 _DSN = CollectorSettings().clickhouse_dsn
 _TABLE = "test_levels"
@@ -171,3 +171,37 @@ def test_a_different_batching_of_the_same_rows_does_duplicate(
     )
 
     assert _count(sink) == 500
+
+
+def test_the_timed_sink_reports_both_rates_and_the_percentiles(
+    sink: ClickHouseSink,
+) -> None:
+    """The four Phase 7 numbers come out of one run, which is the point."""
+    timed = TimedBatchSink(sink)
+    arrow_batching_sink(timed, schema=ARROW_SCHEMA, max_rows=50, max_seconds=60).write(
+        _rows(200)
+    )
+
+    summary = timed.summary()
+    assert summary["flushes"] == 4
+    assert summary["rows"] == 200
+    assert summary["sustained_rows_s"] > 0
+    assert summary["burst_rows_s"] > 0
+    # `monotonic_ts` on these rows is 0..199, i.e. nanoseconds since the epoch
+    # of a monotonic clock — so the latency is the process's own uptime. The
+    # assertion is on the ordering the percentiles must have, not on a value.
+    assert (
+        summary["receive_to_disk_p50_ms"]
+        <= summary["receive_to_disk_p90_ms"]
+        <= summary["receive_to_disk_p99_ms"]
+    )
+
+
+def test_a_run_too_short_to_have_a_rate_reports_nothing(sink: ClickHouseSink) -> None:
+    """One flush is not a rate, and inventing one from a single point is worse."""
+    timed = TimedBatchSink(sink)
+    arrow_batching_sink(timed, schema=ARROW_SCHEMA, max_rows=500, max_seconds=60).write(
+        _rows(10)
+    )
+
+    assert timed.summary() == {}
