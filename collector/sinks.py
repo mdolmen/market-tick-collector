@@ -195,8 +195,14 @@ class TimedBatchSink:
     is per flush: rows and the wall clock they landed at, which is what a
     sustained rate and a burst are computed from afterwards.
 
-    The rows are counted at flush rather than sampled, because a burst is
-    exactly the thing sampling loses.
+    **Both rates are bucketed by when a row was *received*, not by when its
+    batch landed**, and the first cut of this got it wrong in a way worth
+    keeping on the page. Attributing a whole batch to its flush second reported
+    a burst of exactly 50,000 rows/s on a 300s Kraken run — which is
+    `batch_max_rows`, not a property of the feed. A batch that took six seconds
+    to fill had all six seconds of arrivals counted into the instant it was
+    written. Every row carries `monotonic_ts`, so the arrival second is right
+    there and the flush time is simply the wrong clock to ask.
 
     **Live modes only.** A replay's `monotonic_ts` came out of a capture file
     written days ago, so the latency here would be the age of the corpus under
@@ -220,19 +226,19 @@ class TimedBatchSink:
         # run holds ~7M floats — roughly 60 MB, which is affordable for a bench
         # run and is why this is wired by mode rather than always.
         self.latencies: list[float] = []
-        # (landed_at, rows) per flush, in order. A 600s run at the 2s trigger is
-        # ~300 entries, so holding them costs nothing and lets the summary
-        # compute a burst over any window it likes.
-        self.flushes: list[tuple[float, int]] = []
+        # Rows per arrival second, keyed by `monotonic_ts // 1e9`. A counter
+        # rather than a list of timestamps: a 300s run has 300 keys whatever
+        # the rate, so this stays flat where holding every arrival would not.
+        self.arrivals: Counter[int] = Counter()
+        self.flushes = 0
 
     def write_batch(self, batch: pa.RecordBatch) -> WriteResult:
         result = self._inner.write_batch(batch)
         landed = time.monotonic_ns()
-        self.latencies.extend(
-            (landed - received) / 1e9
-            for received in batch.column("monotonic_ts").to_pylist()
-        )
-        self.flushes.append((landed / 1e9, batch.num_rows))
+        for received in batch.column("monotonic_ts").to_pylist():
+            self.latencies.append((landed - received) / 1e9)
+            self.arrivals[received // 1_000_000_000] += 1
+        self.flushes += 1
         return result
 
     def close(self) -> None:
@@ -241,25 +247,21 @@ class TimedBatchSink:
     def summary(self) -> dict[str, float]:
         """Receive-to-disk percentiles, and the two rates, from one run.
 
-        Sustained is rows over the span the flushes cover — not over the run's
-        wall clock, which would include the subscribe and bootstrap before the
-        first row existed. Burst is the busiest one-second bucket, which is the
-        number `TODO.md` asks for beside the sustained one and the reason the
-        flushes are kept rather than accumulated.
+        Sustained is rows over the span they *arrived* in — not the run's wall
+        clock, which includes the subscribe and bootstrap before the first row
+        existed. Burst is the busiest single arrival second. Both are live-run
+        figures and neither is the replay ceiling.
         """
-        if len(self.flushes) < 2:
+        if self.flushes < 2 or not self.arrivals:
             return {}
-        rows = sum(count for _, count in self.flushes)
-        span = self.flushes[-1][0] - self.flushes[0][0]
-        buckets: Counter[int] = Counter()
-        for landed, count in self.flushes:
-            buckets[int(landed)] += count
+        rows = sum(self.arrivals.values())
+        span = max(self.arrivals) - min(self.arrivals) + 1
         ordered = sorted(self.latencies)
         return {
-            "flushes": len(self.flushes),
+            "flushes": self.flushes,
             "rows": rows,
-            "sustained_rows_s": rows / span if span > 0 else 0.0,
-            "burst_rows_s": float(max(buckets.values())),
+            "sustained_rows_s": rows / span,
+            "burst_rows_s": float(max(self.arrivals.values())),
             "receive_to_disk_p50_ms": _percentile(ordered, 0.50) * 1000,
             "receive_to_disk_p90_ms": _percentile(ordered, 0.90) * 1000,
             "receive_to_disk_p99_ms": _percentile(ordered, 0.99) * 1000,

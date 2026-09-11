@@ -186,7 +186,11 @@ def test_the_timed_sink_reports_both_rates_and_the_percentiles(
     assert summary["flushes"] == 4
     assert summary["rows"] == 200
     assert summary["sustained_rows_s"] > 0
-    assert summary["burst_rows_s"] > 0
+    # Bucketed by arrival, not by flush. These rows carry `monotonic_ts` 0..199
+    # nanoseconds, so every one of them lands in arrival second 0 — a burst of
+    # 200, the whole corpus, and never the 50-row batch size. Attributing rows
+    # to their flush second is what this asserts against.
+    assert summary["burst_rows_s"] == 200
     # `monotonic_ts` on these rows is 0..199, i.e. nanoseconds since the epoch
     # of a monotonic clock — so the latency is the process's own uptime. The
     # assertion is on the ordering the percentiles must have, not on a value.
