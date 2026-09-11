@@ -139,12 +139,17 @@ is a legal `Source` and `WorkerApp` ran it untouched, so Phase 0 needed **zero**
 
 - [x] Kraken CRC32 as a venue-native check — built in Phase 2.5; the REST oracle is Phase 6
 
-## Phase 9 · Read layer
+## Phase 9 · Read layer — cut
 
-- [ ] `DatasetReader` protocol in `data-pipeline-core`: returns Arrow, hides partitioning
-- [ ] ClickHouse implementation, sized against the `ORDER BY` chosen in Phase 4
-- [ ] Parquet/DuckDB implementation over the GCS archive tier
-- [ ] Consumer-side helper: one symbol over one time window, returning Arrow.
+- [x] ~~`DatasetReader` protocol in `data-pipeline-core`: returns Arrow, hides partitioning~~
+      — no caller in either consumer, and the acceptance test it set itself fails. See `NOTES.md`
+- [x] ~~ClickHouse implementation, sized against the `ORDER BY` chosen in Phase 4~~ — one
+      consumer, so it fails the SDK's rule of two
+- [x] ~~Parquet/DuckDB implementation over the GCS archive tier~~ — that tier was cut in
+      Phase 7, and the one Parquet read this repo makes is two lines of `pyarrow.dataset`
+      in `tools/book.py`
+- [x] ~~Consumer-side helper: one symbol over one time window, returning Arrow.~~ — cut with
+      the protocol; nothing calls it
 
 ## Docs
 

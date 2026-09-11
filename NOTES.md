@@ -843,8 +843,9 @@ ClickHouse.
 
 **Sort key `(venue, symbol, receive_ts, seq)`, partitioned `toDate(receive_ts)`** — measured
 in Phase 4 against arrival order over ten million identical rows: 258 MB against 344 MB, and
-16,385 rows read against 458,752 for the one-symbol/one-minute read the read layer is built
-around — Phase 10 when this was measured, Phase 9 after the re-scope. Daily partitions because retention and the archive tier drop a day at a
+16,385 rows read against 458,752 for the one-symbol/one-minute read it was chosen against —
+the read layer that would have served it is cut, but the read is the one any consumer of this
+table makes first and the sort key stands on its own. Daily partitions because retention and the archive tier drop a day at a
 time; not partitioned by venue, because `venue` already leads the sort key and adding it to
 the partition expression only multiplies parts.
 
@@ -956,7 +957,9 @@ landing a table quietly missing columns. Hints are built per column now.
 Every "10⁷/day" in this file and in `TODO.md` predates Phase 3 and was written when a run
 carried one symbol. Measured across 188 symbols per venue, diff rows only, bootstraps
 excluded: binance 9.6e7/day, coinbase 4.8e8/day, kraken 4.7e8/day. Retention, the archive
-tier and the read layer all inherit the correction, and none of them has been re-sized yet.
+tier and the read layer would each have inherited the correction; all three were cut before
+being re-sized against it, so the number is an input waiting on a consumer rather than a
+debt. `bench/volume.py` reproduces it.
 
 ### Make-before-break — SKIPPED, and here is what that leaves open
 
@@ -1086,7 +1089,8 @@ small point in favour of the reader-thread option in 7 — `Lifecycle` is alread
 This list is a diff against the SDK as found, and stays accurate as one. It is no longer the
 work list: 4 is cut outright and 6 shrinks to its metrics half, both in § *Re-scope*. The
 gap that list never named — the SDK can write a curated dataset and cannot read one back —
-is the read layer's `DatasetReader`.
+is still open, and stays open: see § *The read layer*, which cut the `DatasetReader` that
+was to close it for want of a single caller in either consumer.
 
 **Item 3 was only half-fixed in Phase 4, and Phase 7 found the other half.** The batch `Sink`
 shipped as `BatchSink[RecordT]` with `write_batch(Sequence[RecordT])`, which is a row-oriented
@@ -1121,12 +1125,15 @@ matter how reusable it looks.
 | Drop and queue-depth metrics, against a frozen label surface | Per-venue sequencing dialects and gap rules |
 | Connection supervisor: reader threads, reconnect, backoff, the bounded queue | Which streams shard onto which socket, and the venue's REST pacing |
 | Batch-oriented `Sink` with flush triggers | Symbol normalization and the venue tables |
-| `DatasetReader`: returns Arrow, hides partitioning | Checksum validation, the REST oracle |
+| — | Checksum validation, the REST oracle |
 | — | Point-in-time correct book reads, as-of semantics |
 
 The bounded queue and the checkpoint protocol were in the left column until the September
-2026 re-scope removed both; see § *Re-scope*. `DatasetReader` replaced them, and unlike them
-it has a second consumer to prove it against.
+2026 re-scope removed both; see § *Re-scope*. `DatasetReader` replaced them and then went
+the same way — it was claimed here to have "a second consumer to prove it against", and that
+was wrong: the betting repo's curated tier is empty and nothing in either repo reads one.
+Three proposed primitives, one test, three failures. Passing that test three times in a row
+is the point, and the left column is what survived it.
 
 ---
 
@@ -1340,35 +1347,44 @@ hotspot, I was wrong, here is the before and after" is one of the better stories
 had. It goes anyway because it is downstream of Phase 7, and a profile of a pipeline whose
 sink does not exist profiles the wrong thing. If Phase 7 lands early it comes back.
 
-### The read layer — split at the SDK boundary
+### The read layer — CUT, September 2026
 
-Phase 10 in the old numbering; it becomes Phase 9 once the benchmark phase is gone.
+Phase 10 in the old numbering, Phase 9 after the benchmark phase went. Cut entirely, on the
+test the section wrote for itself.
 
-The SDK is asymmetric: `Sink` writes, and `staging.py`'s `raw_landing_source` reads back
-what `raw_landing_sink` wrote — but only for the raw tier. The curated tier has no read half
-at all, in either consumer. That is a real gap and closing it is a legitimate primitive: a
-`DatasetReader` protocol returning Arrow and hiding partitioning, with a ClickHouse
-implementation against the `ORDER BY` Phase 4 chose and a DuckDB one over the Parquet
-archive.
+The observation it started from is true and stays on the record. The SDK is asymmetric:
+`Sink` writes, and `staging.py`'s `raw_landing_source` reads back what `raw_landing_sink`
+wrote — but only for the raw tier. The curated tier has no read half at all, in either
+consumer. What does not follow is that a `DatasetReader` protocol closes it.
 
-What does *not* go in the SDK is everything that made the original phase interesting to this
-repo: point-in-time correct book reads, as-of semantics, snapshot-at-time. That is
-market-data semantics and it sits on the same side of the line as symbol normalization — see
-§ *Where the boundary falls*, which already puts canonical models out of scope.
+**The test was: can `proba-markets-analysis` read its curated tier through it. It cannot —
+and not for want of trying.** That bucket is empty. The transform job is `paused = true` in
+`infra/dev/main.tf`, so 289 MB of raw has landed and zero curated has. The one read-back
+that repo actually performs is a notebook over the *raw* tier, which the SDK already serves;
+every curated consumer it plans — Streamlit KPIs, FastAPI serving, the feature store's
+`training_frame` — sits behind at least four unchecked phases its own `PLAN.md` marks
+deprioritised. There is no dataset to read and nothing asking to read one.
 
-**And it is cut here too, not merely relocated.** The consumer-side helper is one read: a
-symbol over a time window, returning Arrow. That is not a compromise pick — it is the read
-`bench/clickhouse.py` already probes as "one symbol, one minute", and the read the MergeTree
-sort key was chosen against in Phase 4. Building as-of semantics on top would be inventing
-demand for a query nothing in the repo makes. If a consumer of the data ever needs
-snapshot-at-time, it arrives as a requirement with a caller attached, which is the only
-condition under which it should have been built anyway.
+**And this repo does not need it either.** Nothing here reads the curated tier.
+`bench/clickhouse.py` runs read probes, but those are the Phase 4 sort-key benchmark, not an
+access path. The only reader of landed data is `tools/book.py`, and it is
+`ds.dataset(path, format="parquet").to_table()` — two lines, over an unpartitioned directory,
+with no plumbing a protocol would remove. The ClickHouse implementation fails the SDK's rule
+of two on its own: one consumer. The Parquet/DuckDB one pointed at the GCS archive tier that
+Phase 7 had already cut.
 
-The `DatasetReader` protocol still has to earn the SDK, and the only test that settles it is
-whether `proba-markets-analysis` can read its curated tier through it. Written down here
-rather than as a task, since the task list now takes the extraction as decided: if the
-betting repo cannot use it, it is not a primitive and it collapses back into this repo
-beside the helper.
+So the reasoning this section used to cut as-of semantics applies one level up, to the
+section itself: *if a consumer of the data ever needs it, it arrives as a requirement with a
+caller attached, which is the only condition under which it should have been built anyway.*
+Nothing had a caller attached. Deferred in `data-pipeline-core`'s backlog with that trigger
+written down, rather than deleted.
+
+**What it costs, stated plainly.** The SDK ships a write half and no read half for the
+curated tier, and that is now a documented gap rather than a closed one — a real asymmetry
+in a repo whose whole argument is that its abstractions were forced by use rather than
+guessed at. The consolation is that it is the same argument: an abstraction built for a
+caller that does not exist would have been the louder failure, and the gap is cheap to close
+the day somebody falls into it.
 
 ### What this costs, stated plainly
 
