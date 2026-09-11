@@ -104,6 +104,40 @@ ARROW_SCHEMA = pa.schema(
     ]
 )
 
+# The same model a third time, in dlt's hint spelling, for the Parquet tier.
+# **Pinned because dlt infers per load**, and a load in which `exchange_ts` is
+# entirely null — which is every Binance REST snapshot — does not land the
+# column at all. Phase 0 hit exactly that: files in one dataset disagreed about
+# their width and reading the directory as one dataset failed on a file that
+# was individually valid.
+#
+# `price_ticks` and `size_lots` are decimals here for the reason `TICKS` gives
+# above, and it bites harder on this tier: dlt's `bigint` is a 64-bit Parquet
+# column, so Kraken's 8.9e19 tick would overflow it. Python's int reaching a
+# fixed-width type is the same discovery in a second place.
+# A fresh dict per column, never a shared one: dlt writes the column's own
+# `name` into the hint it is given, so two columns sharing a dict end up
+# claiming the same name and dlt merges them into one. It says so in a warning
+# and then lands a table quietly missing columns.
+def _hint(data_type: str, *, nullable: bool, **extra: object) -> dict[str, object]:
+    return {"data_type": data_type, "nullable": nullable, **extra}
+
+
+DLT_COLUMNS: dict[str, dict[str, object]] = {
+    "venue": _hint("text", nullable=False),
+    "symbol": _hint("text", nullable=False),
+    "seq": _hint("bigint", nullable=False),
+    "exchange_ts": _hint("bigint", nullable=True),
+    "receive_ts": _hint("bigint", nullable=False),
+    "monotonic_ts": _hint("bigint", nullable=False),
+    "action": _hint("text", nullable=False),
+    "side": _hint("text", nullable=True),
+    "price_str": _hint("text", nullable=True),
+    "price_ticks": _hint("decimal", nullable=True, precision=38, scale=0),
+    "size_str": _hint("text", nullable=True),
+    "size_lots": _hint("decimal", nullable=True, precision=38, scale=0),
+}
+
 
 def scaled_int(value: str, scale: int) -> int:
     """Scale a venue's decimal string to an exact integer, or refuse.

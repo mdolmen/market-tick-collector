@@ -68,13 +68,13 @@ from data_pipeline_core.runtime.logging import get_logger
 
 from collector import adapters
 from collector.capture import CaptureRecord
-from collector.model import ARROW_SCHEMA, LevelRow
+from collector.model import ARROW_SCHEMA, DLT_COLUMNS, LevelRow
 from collector.rates import RATES
 from collector.replay import FaultConfig, ReplaySource
 from collector.router import BookRouter
 from collector.settings import CollectorSettings
 from collector.shard import plan_shards, shard_size
-from collector.sinks import ClickHouseSink, ConsoleSink
+from collector.sinks import ClickHouseSink, ConsoleSink, WidenedTickSink
 from collector.source import FrameSource
 from collector.supervisor import ShardSupervisor
 from collector.symbols import tradable
@@ -178,10 +178,15 @@ def _row_sink(settings: CollectorSettings) -> Sink[LevelRow]:
             max_rows=settings.batch_max_rows,
             max_seconds=settings.batch_max_seconds,
         )
-    return dlt_sink(
-        dataset=settings.dataset,
-        destination=settings.destination,
-        table_name=settings.table_name,
+    return WidenedTickSink(
+        dlt_sink(
+            dataset=settings.dataset,
+            destination=settings.destination,
+            table_name=settings.table_name,
+            # Pinned, not inferred: a load whose `exchange_ts` is entirely null
+            # would otherwise land without the column. See `collector/model.py`.
+            columns=DLT_COLUMNS,
+        )
     )
 
 

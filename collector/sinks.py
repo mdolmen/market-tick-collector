@@ -14,13 +14,15 @@ that measurement is quoted against.
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
+from dataclasses import dataclass
+from decimal import Decimal
 
 import clickhouse_connect
 import pyarrow as pa
-from data_pipeline_core import WriteResult, deterministic_id
+from data_pipeline_core import Sink, WriteResult, deterministic_id
 
-from collector.model import ARROW_SCHEMA, CLOCKS
+from collector.model import ARROW_SCHEMA, CLOCKS, LevelRow
 
 # The DDL the spike settled on. `(venue, symbol, receive_ts, seq)` beat arrival
 # order on both counts that matter — 258 MB against 344 MB over ten million
@@ -78,6 +80,53 @@ class ConsoleSink:
             count += 1
         print(f"[console-sink] {count} record(s)")
         return WriteResult(row_count=count)
+
+
+@dataclass(frozen=True)
+class WidenedTickSink:
+    """Hand the Parquet tier its 128-bit ticks as ``Decimal``, not as ``int``.
+
+    **dlt refuses a Python int wider than 64 bits, at extract, before any
+    column hint is consulted** — `TypeError: Integer exceeds 64-bit range`. So
+    declaring `price_ticks` as `decimal(38, 0)` in `DLT_COLUMNS` fixes the
+    column's *type* and not this: the value never reaches the column. A
+    `Decimal` of the same magnitude lands exactly.
+
+    That makes it a real defect on the default output rather than a limit worth
+    stating: `SCALE = 8` puts the int64 ceiling at ~9.2e10, and Kraken's
+    depth-1000 `BCH/USD` book carries an ask at 886,110,000,000.00 — so
+    `MTC_OUTPUT=parquet` over Kraken's full symbol set crashes the run on a
+    single junk order. The ClickHouse tier never had the problem, because Arrow
+    carries the int straight into a `decimal128(38, 0)`.
+
+    A wrapper rather than a ``Transform``, because the widened row is no longer
+    a ``LevelRow`` — the model says those two fields are ``int`` and it is right
+    to. The conversion belongs at the boundary into dlt, which is the only
+    thing that wants it, and the stream stays lazy through it.
+
+    Applied only on the Parquet path, and per row, which is a cost this does
+    not pay anywhere else — the curated tier is ClickHouse and Phase 0 measured
+    `Decimal` construction at four times the JSON decode. The two tick columns
+    only.
+    """
+
+    inner: Sink[Mapping[str, object]]
+
+    def write(self, records: Iterable[LevelRow]) -> WriteResult:
+        return self.inner.write(_widened(records))
+
+
+def _widened(records: Iterable[LevelRow]) -> Iterator[Mapping[str, object]]:
+    for row in records:
+        ticks, lots = row["price_ticks"], row["size_lots"]
+        if ticks is None and lots is None:
+            yield row
+            continue
+        yield {
+            **row,
+            "price_ticks": None if ticks is None else Decimal(ticks),
+            "size_lots": None if lots is None else Decimal(lots),
+        }
 
 
 class ClickHouseSink:
