@@ -59,7 +59,7 @@ is a legal `Source` and `WorkerApp` ran it untouched, so Phase 0 needed **zero**
 - [x] No full-depth channel exists — depth is 10/25/100/500/1000. Running the 1000 ceiling
 - [x] Trim the checksum view: the venue leaves levels behind, 1000 → 1040 a side in 60s
 - [x] A second depth per symbol is refused — Phase 8's Oracle 2 does not exist here
-- [ ] ~~Re-run the Phase 6 book benchmark with the checksum in the loop~~ — premise wrong. The CRC reads the venue's decimal strings and `Book` has none, so it never touches that structure. See Phase 6 and `bench/checksum.py`
+- [x] ~~Re-run the Phase 6 book benchmark with the checksum in the loop~~ — premise wrong. The CRC reads the venue's decimal strings and `Book` has none, so it never touches that structure. See Phase 6 and `bench/checksum.py`
 
 ## Phase 3 · Connection supervision & sharding
 
@@ -70,14 +70,13 @@ is a legal `Source` and `WorkerApp` ran it untouched, so Phase 0 needed **zero**
 - [x] Batch SUBSCRIBE frames; the outbound limit is 5 msg/s on Binance spot
 - [x] Per-connection backoff, liveness and resubscribe; a failure never crosses connections
 - [x] Stagger connection opens so Binance's 24h expiry never synchronises the shards
-- [ ] Make-before-break at ~23h — moved to Phase 4; break-before-make ships here
 - [x] Stagger the REST snapshot storm after any multi-book recovery, against the rate limit
 - [x] Demultiplex a shard's records into one book per symbol
 - [x] Judge connection-scoped continuity per connection, not per book
 
 ## Phase 4 · SDK extension: `ServiceApp` + streaming primitives
 
-- [ ] ~~Make-before-break at ~23h~~ — skipped; break-before-make measured 0 gaps in Phase 3
+- [x] ~~Make-before-break at ~23h~~ — skipped; break-before-make measured 0 gaps in Phase 3
 - [x] ClickHouse spike **first** — the sink contract below is designed for its insert path
 - [x] Load a day of Phase 1 capture; pick the MergeTree sort key and partitioning
 - [x] One row per price level at 10⁷/day makes that ordering load-bearing, so measure it
